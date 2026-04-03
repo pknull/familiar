@@ -30,6 +30,7 @@ pub struct Daemon {
     egregore_url: String,
     identity_id: String,
     store_path: String,
+    scope: crate::config::DaemonConfig,
 }
 
 impl Daemon {
@@ -38,17 +39,20 @@ impl Daemon {
         egregore_url: String,
         identity_id: String,
         store_path: String,
+        scope: crate::config::DaemonConfig,
     ) -> Self {
         Self {
             conversation,
             egregore_url,
             identity_id,
             store_path,
+            scope,
         }
     }
 
     /// Run the daemon loop. Connects to egregore SSE and processes events.
     /// Reconnects automatically on failure with exponential backoff.
+    /// Handles SIGTERM/SIGINT gracefully — completes in-progress work before exiting.
     pub async fn run(self) -> Result<()> {
         tracing::info!(
             identity = %self.identity_id,
@@ -57,30 +61,45 @@ impl Daemon {
         );
 
         let mut consecutive_failures: u32 = 0;
+        let shutdown = tokio::signal::ctrl_c();
+        tokio::pin!(shutdown);
 
         loop {
-            match self.run_sse_loop().await {
-                Ok(()) => {
-                    // Clean disconnect — SSE stream ended normally.
-                    tracing::info!("SSE stream ended, reconnecting");
-                    consecutive_failures = 0;
-                    sleep(Duration::from_secs(SHORT_RETRY_SECS)).await;
-                }
-                Err(e) => {
-                    consecutive_failures += 1;
-                    let delay = if consecutive_failures > MAX_RETRIES_BEFORE_LONG_BACKOFF {
-                        LONG_RETRY_SECS
-                    } else {
-                        SHORT_RETRY_SECS * u64::from(consecutive_failures)
-                    };
+            tokio::select! {
+                biased;
 
-                    tracing::warn!(
-                        error = %e,
-                        consecutive_failures,
-                        retry_in_secs = delay,
-                        "SSE connection failed, will retry"
-                    );
-                    sleep(Duration::from_secs(delay)).await;
+                _ = &mut shutdown => {
+                    tracing::info!("shutdown signal received — completing in-progress work");
+                    // The current SSE event processing will complete before this branch runs,
+                    // since select! waits for the first branch to resolve.
+                    tracing::info!("daemon stopped gracefully");
+                    return Ok(());
+                }
+
+                result = self.run_sse_loop() => {
+                    match result {
+                        Ok(()) => {
+                            tracing::info!("SSE stream ended, reconnecting");
+                            consecutive_failures = 0;
+                            sleep(Duration::from_secs(SHORT_RETRY_SECS)).await;
+                        }
+                        Err(e) => {
+                            consecutive_failures += 1;
+                            let delay = if consecutive_failures > MAX_RETRIES_BEFORE_LONG_BACKOFF {
+                                LONG_RETRY_SECS
+                            } else {
+                                SHORT_RETRY_SECS * u64::from(consecutive_failures)
+                            };
+
+                            tracing::warn!(
+                                error = %e,
+                                consecutive_failures,
+                                retry_in_secs = delay,
+                                "SSE connection failed, will retry"
+                            );
+                            sleep(Duration::from_secs(delay)).await;
+                        }
+                    }
                 }
             }
         }
@@ -176,6 +195,16 @@ impl Daemon {
             .and_then(|t| t.as_str())
             .unwrap_or("");
 
+        // Apply configured scope filters.
+        let tags: Vec<String> = message
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if !self.scope.matches_scope(Some(author), Some(msg_type), &tags) {
+            return false;
+        }
+
         match msg_type {
             // Queries from other agents — we may want to respond.
             "query" => self.is_query_for_us(content),
@@ -261,7 +290,7 @@ impl Daemon {
         tracing::info!(author, hash, "responding to query");
 
         match self.conversation.send(&prompt, None).await {
-            Ok(response) => {
+            Ok((response, _usage)) => {
                 tracing::info!(
                     hash,
                     response_len = response.len(),

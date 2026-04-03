@@ -6,6 +6,7 @@
 
 pub mod discord;
 pub mod repl;
+pub mod tui_channel;
 
 use async_trait::async_trait;
 

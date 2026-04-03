@@ -21,6 +21,7 @@ const SYSTEM_PROMPT: &str =
 pub struct Heartbeat {
     provider: Box<dyn Provider>,
     store_path: String,
+    workspace_daily_dir: String,
     interval: Duration,
     quiet_start: u32,
     quiet_end: u32,
@@ -31,6 +32,7 @@ impl Heartbeat {
     pub fn new(
         provider: Box<dyn Provider>,
         store_path: String,
+        workspace_daily_dir: String,
         interval: Duration,
         quiet_start: u32,
         quiet_end: u32,
@@ -38,6 +40,7 @@ impl Heartbeat {
         Self {
             provider,
             store_path,
+            workspace_daily_dir,
             interval,
             quiet_start,
             quiet_end,
@@ -92,6 +95,13 @@ impl Heartbeat {
 
         if !trimmed.is_empty() && trimmed.to_lowercase() != "ok" {
             println!("\n[heartbeat] {trimmed}\n");
+
+            // Append heartbeat finding to daily log
+            self.append_daily_log(&format!(
+                "- [{}] heartbeat: {}",
+                chrono::Local::now().format("%H:%M"),
+                trimmed
+            ));
         }
 
         Ok(())
@@ -100,6 +110,29 @@ impl Heartbeat {
     /// Check whether the given hour falls within quiet hours.
     fn in_quiet_hours(&self, hour: u32) -> bool {
         is_quiet_hour(self.quiet_start, self.quiet_end, hour)
+    }
+
+    /// Append an entry to today's daily log in the workspace.
+    fn append_daily_log(&self, entry: &str) {
+        let workspace_dir = std::path::PathBuf::from(&self.workspace_daily_dir);
+
+        if !workspace_dir.exists() {
+            let _ = std::fs::create_dir_all(&workspace_dir);
+        }
+
+        let today = chrono::Local::now().format("%Y-%m-%d");
+        let path = workspace_dir.join(format!("{}.md", today));
+
+        let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(entry);
+        content.push('\n');
+
+        if let Err(e) = std::fs::write(&path, content) {
+            tracing::warn!(error = %e, "failed to write daily log");
+        }
     }
 }
 

@@ -38,6 +38,15 @@ pub struct Config {
 
     #[serde(default)]
     pub discord: Option<DiscordConfig>,
+
+    #[serde(default)]
+    pub tools: ToolTrustConfig,
+
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+
+    #[serde(default)]
+    pub tui: TuiConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -95,6 +104,11 @@ pub struct AgentConfig {
     /// rejected before execution.
     #[serde(default)]
     pub blocked_tools: Vec<String>,
+    /// Allowed tool patterns (glob). When non-empty, only MCP tools matching
+    /// a pattern are permitted. Built-in tools (egregore_*, local_*) are
+    /// always allowed regardless of this setting.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
 }
 
 impl Default for AgentConfig {
@@ -104,6 +118,7 @@ impl Default for AgentConfig {
             timeout_secs: default_timeout(),
             system_prompt: None,
             blocked_tools: Vec::new(),
+            allowed_tools: Vec::new(),
         }
     }
 }
@@ -206,6 +221,89 @@ fn default_thinking_text() -> String {
     "thinking...".to_string()
 }
 
+/// TUI operator console configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TuiConfig {
+    /// Color theme.
+    #[serde(default = "default_tui_theme")]
+    pub theme: String,
+
+    /// Use vim keybindings in input widget.
+    #[serde(default)]
+    pub vim_mode: bool,
+
+    /// Enable mouse support (click focus, scroll).
+    #[serde(default = "default_true")]
+    pub mouse: bool,
+
+    /// Status bar template with {model}, {session}, {turn}, {tokens} variables.
+    #[serde(default = "default_status_template")]
+    pub status_template: String,
+
+    /// Configurable sidebar panes.
+    #[serde(default)]
+    pub panes: Vec<PaneConfig>,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            theme: default_tui_theme(),
+            vim_mode: false,
+            mouse: true,
+            status_template: default_status_template(),
+            panes: Vec::new(),
+        }
+    }
+}
+
+fn default_tui_theme() -> String {
+    "dark".to_string()
+}
+
+fn default_status_template() -> String {
+    "{model} | t:{turn} | {tokens}tok | {session}".to_string()
+}
+
+/// Configuration for a sidebar pane.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PaneConfig {
+    /// Pane data source: egregore_feed, tasks, peers, script.
+    pub source: String,
+
+    /// Position in the layout.
+    #[serde(default = "default_pane_position")]
+    pub position: String,
+
+    /// Height as percentage of sidebar space (e.g. "40%").
+    #[serde(default)]
+    pub height: Option<String>,
+
+    /// Filter by content type (comma-separated, for feed panes).
+    #[serde(default)]
+    pub filter_content_type: Option<String>,
+
+    /// External command to run (for script panes).
+    #[serde(default)]
+    pub command: Option<String>,
+
+    /// Auto-restart script on exit.
+    #[serde(default)]
+    pub restart: bool,
+
+    /// Poll interval in seconds (for peers pane).
+    #[serde(default)]
+    pub poll_interval_secs: Option<u64>,
+
+    /// TTL for completed tasks before fading (for task pane).
+    #[serde(default)]
+    pub completed_ttl_secs: Option<u64>,
+}
+
+fn default_pane_position() -> String {
+    "right".to_string()
+}
+
 /// Discord bot configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DiscordConfig {
@@ -223,6 +321,107 @@ pub struct DiscordConfig {
 
 fn default_true() -> bool {
     true
+}
+
+/// Tool trust configuration — controls which tools get full authority vs suggestion-only.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ToolTrustConfig {
+    /// Tools with full system prompt authority. Glob patterns (e.g., "docker:*").
+    #[serde(default)]
+    pub trusted: Vec<String>,
+    /// Tools with suggestion-only authority (disclaimer appended to their output).
+    #[serde(default)]
+    pub installed: Vec<String>,
+}
+
+impl ToolTrustConfig {
+    /// Determine the trust level of a tool by name.
+    pub fn trust_level(&self, tool_name: &str) -> TrustLevel {
+        for pattern in &self.trusted {
+            if glob_match(pattern, tool_name) {
+                return TrustLevel::Trusted;
+            }
+        }
+        for pattern in &self.installed {
+            if glob_match(pattern, tool_name) {
+                return TrustLevel::Installed;
+            }
+        }
+        TrustLevel::Installed // Default: suggestion-only for unlisted tools
+    }
+}
+
+/// Trust level for a tool.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrustLevel {
+    /// Full authority — tool output injected as-is.
+    Trusted,
+    /// Suggestion only — disclaimer appended.
+    Installed,
+}
+
+/// Simple glob matching: "*" at end matches any suffix.
+/// Only trailing wildcards are supported (e.g., "docker:*").
+/// Mid-string wildcards like "do*cker" are not supported.
+pub(crate) fn glob_match(pattern: &str, name: &str) -> bool {
+    if pattern.contains('*') {
+        let prefix = pattern.trim_end_matches('*');
+        name.starts_with(prefix)
+    } else {
+        name == pattern
+    }
+}
+
+/// Daemon mode configuration — scope limits for broadcast query handling.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct DaemonConfig {
+    /// Only respond to queries from these authors (empty = all).
+    #[serde(default)]
+    pub author_allowlist: Vec<String>,
+    /// Only respond to queries with these content types (empty = all).
+    #[serde(default)]
+    pub content_type_filter: Vec<String>,
+    /// Only respond to queries with these tags (empty = all).
+    #[serde(default)]
+    pub tag_filter: Vec<String>,
+}
+
+impl DaemonConfig {
+    /// Check if a message matches the daemon's scope filters.
+    pub fn matches_scope(
+        &self,
+        author: Option<&str>,
+        content_type: Option<&str>,
+        tags: &[String],
+    ) -> bool {
+        // Author filter
+        if !self.author_allowlist.is_empty() {
+            if let Some(a) = author {
+                if !self.author_allowlist.iter().any(|allowed| allowed == a) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        // Content type filter
+        if !self.content_type_filter.is_empty() {
+            if let Some(ct) = content_type {
+                if !self.content_type_filter.iter().any(|f| f == ct) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        // Tag filter
+        if !self.tag_filter.is_empty() {
+            if !self.tag_filter.iter().any(|t| tags.contains(t)) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 impl Config {

@@ -126,13 +126,13 @@ impl EgregoreClient {
     ) -> Result<Vec<serde_json::Value>> {
         let mut url = format!("{}/v1/feed?limit={}", self.api_url, limit);
         if let Some(a) = author {
-            url.push_str(&format!("&author={}", a));
+            url.push_str(&format!("&author={}", urlencoding::encode(a)));
         }
         if let Some(ct) = content_type {
-            url.push_str(&format!("&content_type={}", ct));
+            url.push_str(&format!("&content_type={}", urlencoding::encode(ct)));
         }
         if let Some(t) = tag {
-            url.push_str(&format!("&tag={}", t));
+            url.push_str(&format!("&tag={}", urlencoding::encode(t)));
         }
         if let Some(s) = search {
             url.push_str(&format!("&search={}", urlencoding::encode(s)));
@@ -157,6 +157,29 @@ impl EgregoreClient {
         let envelope: ApiResponse<Vec<serde_json::Value>> =
             response.json().await.map_err(|e| FamiliarError::Egregore {
                 reason: format!("failed to parse query response: {}", e),
+            })?;
+
+        Ok(envelope.data.unwrap_or_default())
+    }
+
+    /// Query mesh peer health status.
+    pub async fn get_mesh(&self) -> Result<Vec<serde_json::Value>> {
+        let url = format!("{}/v1/mesh", self.api_url);
+        let response = self
+            .auth(self.http.get(&url))
+            .send()
+            .await
+            .map_err(|e| FamiliarError::Egregore {
+                reason: format!("mesh request failed: {}", e),
+            })?;
+
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+
+        let envelope: ApiResponse<Vec<serde_json::Value>> =
+            response.json().await.map_err(|e| FamiliarError::Egregore {
+                reason: format!("failed to parse mesh response: {}", e),
             })?;
 
         Ok(envelope.data.unwrap_or_default())

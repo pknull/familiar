@@ -8,7 +8,10 @@ mod error;
 mod heartbeat;
 mod identity;
 mod mcp;
+mod profile;
 mod store;
+mod tui;
+mod workspace;
 
 use std::path::PathBuf;
 
@@ -30,6 +33,10 @@ struct Cli {
     #[arg(short, long, default_value = "~/.familiar/familiar.toml")]
     config: String,
 
+    /// Use simple REPL mode instead of TUI
+    #[arg(long)]
+    simple: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -47,6 +54,13 @@ enum Commands {
     Discord,
     /// Run as persistent daemon (watches feed, responds automatically)
     Daemon,
+    /// List all sessions
+    Sessions,
+    /// Resume a previous session
+    Resume {
+        /// Session ID or slug (interactive picker if omitted)
+        session: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -124,6 +138,34 @@ async fn run(cli: Cli) -> Result<()> {
     let store = Store::open(&store_path)?;
     tracing::info!(path = %store_path.display(), "local store opened");
 
+    // Handle commands that don't need LLM provider.
+    match &cli.command {
+        Some(Commands::Sessions) => {
+            let sessions = store.list_sessions()?;
+            if sessions.is_empty() {
+                println!("No sessions found.");
+            } else {
+                println!("{:<38} {:<30} {}", "ID", "Slug", "Updated");
+                println!("{}", "-".repeat(80));
+                for s in &sessions {
+                    println!("{:<38} {:<30} {}", s.id, s.slug, s.updated_at);
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::Resume { session }) if session.is_none() => {
+            // Interactive picker — check if there are sessions before requiring LLM.
+            let sessions = store.list_sessions()?;
+            if sessions.is_empty() {
+                return Err(FamiliarError::Internal {
+                    reason: "No sessions to resume.".into(),
+                });
+            }
+            // Fall through to full startup for the actual resume with history loading.
+        }
+        _ => {}
+    }
+
     // Create LLM provider
     let llm_config = config.llm.as_ref().ok_or_else(|| FamiliarError::Config {
         reason: "LLM configuration required. Add [llm] section to config.".into(),
@@ -139,6 +181,7 @@ async fn run(cli: Cli) -> Result<()> {
         let hb = heartbeat::Heartbeat::new(
             hb_provider,
             hb_store_path,
+            Config::expand_path("~/.familiar/workspace/daily"),
             std::time::Duration::from_secs(config.heartbeat.interval_secs),
             config.heartbeat.quiet_start,
             config.heartbeat.quiet_end,
@@ -150,6 +193,14 @@ async fn run(cli: Cli) -> Result<()> {
         );
     }
 
+    // Initialize workspace (prompt assembly from ~/.familiar/workspace/)
+    let workspace_dir = Config::expand_path("~/.familiar/workspace");
+    let workspace = workspace::Workspace::new(&workspace_dir)?;
+    tracing::info!(path = %workspace_dir, "workspace initialized");
+
+    // Clone egregore client for sidebar pane pollers (before move into conversation).
+    let egregore_for_panes = egregore.clone();
+
     // Build conversation engine
     let conversation = Conversation::new(
         provider,
@@ -157,12 +208,14 @@ async fn run(cli: Cli) -> Result<()> {
         egregore,
         store,
         config.agent.clone(),
+        config.tools.clone(),
+        workspace,
     );
 
     // Dispatch command
     match cli.command {
         Some(Commands::Exec { prompt }) => {
-            let response = conversation.send(&prompt, None).await?;
+            let (response, _usage) = conversation.send(&prompt, None).await?;
             println!("{}", response);
         }
         Some(Commands::Daemon) => {
@@ -172,6 +225,7 @@ async fn run(cli: Cli) -> Result<()> {
                 config.egregore.api_url.clone(),
                 identity.public_id().to_string(),
                 store_path,
+                config.daemon.clone(),
             );
             tracing::info!("running as daemon");
             daemon.run().await?;
@@ -184,10 +238,256 @@ async fn run(cli: Cli) -> Result<()> {
             tracing::info!("running as Discord bot");
             cli::repl::run_session(Box::new(channel), &conversation, &config.repl).await?;
         }
-        _ => {
-            // Default: interactive REPL channel
+        Some(Commands::Sessions) => {
+            // Handled early (before LLM provider), should not reach here.
+            unreachable!();
+        }
+        Some(Commands::Resume { session }) => {
+            let store_path = PathBuf::from(Config::expand_path(&config.store.path));
+            let resume_store = Store::open(&store_path)?;
+            let sessions = resume_store.list_sessions()?;
+
+            let session_id = match session {
+                Some(ref arg) => {
+                    // Match by ID or slug
+                    sessions.iter()
+                        .find(|s| s.id == *arg || s.slug == *arg)
+                        .map(|s| s.id.clone())
+                        .ok_or_else(|| FamiliarError::Internal {
+                            reason: format!("No session found matching '{}'", arg),
+                        })?
+                }
+                None => {
+                    // Interactive picker
+                    if sessions.is_empty() {
+                        return Err(FamiliarError::Internal {
+                            reason: "No sessions to resume.".into(),
+                        });
+                    }
+                    println!("Select a session to resume:\n");
+                    for (i, s) in sessions.iter().enumerate() {
+                        println!("  {} — {} ({})", i + 1, s.slug, s.updated_at);
+                    }
+                    println!();
+                    print!("Enter number: ");
+                    use std::io::Write;
+                    std::io::stdout().flush().unwrap();
+
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input).map_err(|e| FamiliarError::Internal {
+                        reason: format!("Failed to read input: {}", e),
+                    })?;
+
+                    let idx: usize = input.trim().parse().map_err(|_| FamiliarError::Internal {
+                        reason: "Invalid selection".into(),
+                    })?;
+
+                    if idx == 0 || idx > sessions.len() {
+                        return Err(FamiliarError::Internal {
+                            reason: format!("Selection out of range (1-{})", sessions.len()),
+                        });
+                    }
+
+                    sessions[idx - 1].id.clone()
+                }
+            };
+
+            // Load session history into conversation store.
+            let resume_thread = resume_store.resolve_thread(&session_id, "repl", None)?;
+            let turns = resume_store.thread_recent_turns(&resume_thread, 100)?;
+            let store_path = PathBuf::from(Config::expand_path(&config.store.path));
+            let active_store = Store::open(&store_path)?;
+            for (role, content, tool_calls) in &turns {
+                active_store.add_turn(role, content, tool_calls.as_deref())?;
+            }
+            resume_store.touch_session(&session_id)?;
+            println!("Resumed session: {} ({} turns loaded)", session_id, turns.len());
+
             let channel = channel::repl::ReplChannel::new(config.repl.clone())?;
             cli::repl::run_session(Box::new(channel), &conversation, &config.repl).await?;
+        }
+        _ => {
+            if cli.simple {
+                // --simple: bare REPL, unchanged from original
+                let channel = channel::repl::ReplChannel::new(config.repl.clone())?;
+                cli::repl::run_session(Box::new(channel), &conversation, &config.repl).await?;
+            } else {
+                // Default: TUI operator console
+                let model_name = llm_config.model.clone();
+                let session_name = format!("session-{}", chrono::Local::now().format("%H%M"));
+
+                let state = std::sync::Arc::new(tokio::sync::Mutex::new(
+                    tui::AppState::new(model_name, session_name, config.tui.panes.len(), config.tui.status_template.clone()),
+                ));
+                let (event_tx, event_rx) = tui::event_channel();
+                let (tui_channel, input_tx) = channel::tui_channel::TuiChannel::new(
+                    event_tx.clone(),
+                    std::sync::Arc::clone(&state),
+                );
+
+                // Spawn sidebar pane pollers.
+                for (i, pane) in config.tui.panes.iter().enumerate() {
+                    let pane_state = std::sync::Arc::clone(&state);
+                    let pane_egregore = egregore_for_panes.clone();
+                    let pane_source = pane.source.clone();
+                    let pane_filter = pane.filter_content_type.clone();
+                    let pane_command = pane.command.clone();
+                    let pane_restart = pane.restart;
+                    let poll_secs = pane.poll_interval_secs.unwrap_or(10);
+
+                    tokio::spawn(async move {
+                        use crate::tui::widgets::sidebar::{FeedItem, PaneData, PeerItem, TaskItem};
+                        let mut interval = tokio::time::interval(
+                            std::time::Duration::from_secs(poll_secs),
+                        );
+                        loop {
+                            interval.tick().await;
+                            let data = match pane_source.as_str() {
+                                "egregore_feed" => {
+                                    let ct = pane_filter.as_deref();
+                                    match pane_egregore.query_messages(None, ct, None, None, 20).await {
+                                        Ok(msgs) => PaneData::Feed(
+                                            msgs.iter()
+                                                .map(|m| FeedItem {
+                                                    content_type: m.get("content")
+                                                        .and_then(|c| c.get("type"))
+                                                        .and_then(|t| t.as_str())
+                                                        .unwrap_or("?")
+                                                        .to_string(),
+                                                    summary: m.get("content")
+                                                        .and_then(|c| c.get("title").or(c.get("observation")).or(c.get("question")))
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("")
+                                                        .chars()
+                                                        .take(80)
+                                                        .collect(),
+                                                })
+                                                .collect(),
+                                        ),
+                                        Err(_) => PaneData::Empty,
+                                    }
+                                }
+                                "tasks" => {
+                                    // Query task lifecycle messages (all task-related content types).
+                                    let tag_query = pane_egregore.query_messages(None, None, Some("task"), None, 30).await;
+                                    match tag_query {
+                                        Ok(msgs) => PaneData::Tasks(
+                                            msgs.iter()
+                                                .map(|m| {
+                                                    let content_type = m.get("content")
+                                                        .and_then(|c| c.get("type"))
+                                                        .and_then(|t| t.as_str())
+                                                        .unwrap_or("unknown");
+                                                    let status = match content_type {
+                                                        "task" => "pending",
+                                                        "task_offer" => "offered",
+                                                        "task_assign" => "active",
+                                                        "task_result" => {
+                                                            m.get("content")
+                                                                .and_then(|c| c.get("status"))
+                                                                .and_then(|s| s.as_str())
+                                                                .unwrap_or("completed")
+                                                        }
+                                                        _ => "unknown",
+                                                    };
+                                                    TaskItem {
+                                                        status: status.to_string(),
+                                                        summary: m.get("content")
+                                                            .and_then(|c| c.get("task_id")
+                                                                .or(c.get("prompt"))
+                                                                .or(c.get("summary")))
+                                                            .and_then(|v| v.as_str())
+                                                            .unwrap_or("")
+                                                            .chars()
+                                                            .take(60)
+                                                            .collect(),
+                                                    }
+                                                })
+                                                .collect(),
+                                        ),
+                                        Err(_) => PaneData::Empty,
+                                    }
+                                }
+                                "peers" => {
+                                    match pane_egregore.get_mesh().await {
+                                        Ok(peers) => PaneData::Peers(
+                                            peers.iter()
+                                                .map(|p| PeerItem {
+                                                    name: p.get("peer_id")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("?")
+                                                        .chars()
+                                                        .take(20)
+                                                        .collect(),
+                                                    health: p.get("status")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("unknown")
+                                                        .to_string(),
+                                                })
+                                                .collect(),
+                                        ),
+                                        Err(_) => PaneData::Empty,
+                                    }
+                                }
+                                "script" => {
+                                    if let Some(ref cmd) = pane_command {
+                                        match tokio::process::Command::new("sh")
+                                            .arg("-c")
+                                            .arg(cmd)
+                                            .output()
+                                            .await
+                                        {
+                                            Ok(output) => {
+                                                let stdout = String::from_utf8_lossy(&output.stdout);
+                                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                                let combined = if stderr.is_empty() {
+                                                    stdout.to_string()
+                                                } else {
+                                                    format!("{}\n--- stderr ---\n{}", stdout, stderr)
+                                                };
+                                                PaneData::Script(combined)
+                                            }
+                                            Err(e) => PaneData::Script(format!("error: {}", e)),
+                                        }
+                                    } else {
+                                        PaneData::Script("(no command configured)".into())
+                                    }
+                                }
+                                _ => PaneData::Empty,
+                            };
+
+                            let mut s = pane_state.lock().await;
+                            if let Some(slot) = s.pane_data.get_mut(i) {
+                                *slot = data;
+                            }
+                        }
+                    });
+                }
+
+                // Spawn TUI renderer in background (it's Send-safe).
+                let tui_state = std::sync::Arc::clone(&state);
+                let tui_config = config.tui.clone();
+                let tui_handle = tokio::spawn(async move {
+                    tui::run(tui_state, event_rx, input_tx, &tui_config).await
+                });
+
+                // Run conversation on main thread (Conversation is not Send).
+                let conv_result = cli::repl::run_session(
+                    Box::new(tui_channel),
+                    &conversation,
+                    &config.repl,
+                )
+                .await;
+
+                // If conversation ended, signal TUI to quit.
+                {
+                    let mut s = state.lock().await;
+                    s.should_quit = true;
+                }
+                let _ = tui_handle.await;
+
+                conv_result?;
+            }
         }
     }
 
