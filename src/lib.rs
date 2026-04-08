@@ -8,6 +8,7 @@ pub mod daemon;
 pub mod egregore;
 pub mod error;
 pub mod heartbeat;
+pub mod hooks;
 pub mod identity;
 pub mod mcp;
 pub mod profile;

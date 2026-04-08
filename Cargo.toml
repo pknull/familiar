@@ -1,6 +1,6 @@
 [package]
 name = "familiar"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2021"
 authors = ["Louis Grenzebach <pk@zalgo.net>"]
 description = "Personal companion for the Thallus decentralized AI infrastructure"

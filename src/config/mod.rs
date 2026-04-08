@@ -47,6 +47,9 @@ pub struct Config {
 
     #[serde(default)]
     pub tui: TuiConfig,
+
+    #[serde(default)]
+    pub operator: OperatorConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -109,6 +112,24 @@ pub struct AgentConfig {
     /// always allowed regardless of this setting.
     #[serde(default)]
     pub allowed_tools: Vec<String>,
+    /// Token budget before compaction triggers (default: 80,000).
+    #[serde(default = "default_compaction_token_budget")]
+    pub compaction_token_budget: u64,
+    /// Number of recent turns to preserve during compaction (default: 10).
+    #[serde(default = "default_preserve_recent_turns")]
+    pub preserve_recent_turns: usize,
+    /// Public IDs of trusted servitors for auto-assignment. Empty = accept all.
+    #[serde(default)]
+    pub trusted_servitors: Vec<String>,
+    /// Require servitor to have published a matching servitor_profile before accepting offer.
+    #[serde(default)]
+    pub verify_servitor_profile: bool,
+    /// Seconds to wait for task_started after publishing task_assign (default: 30).
+    #[serde(default = "default_assign_confirm_timeout")]
+    pub assign_confirm_timeout_secs: u64,
+    /// Enable background SSE watching in all modes (default: true).
+    #[serde(default = "default_background_sse")]
+    pub background_sse_enabled: bool,
 }
 
 impl Default for AgentConfig {
@@ -119,8 +140,30 @@ impl Default for AgentConfig {
             system_prompt: None,
             blocked_tools: Vec::new(),
             allowed_tools: Vec::new(),
+            compaction_token_budget: default_compaction_token_budget(),
+            preserve_recent_turns: default_preserve_recent_turns(),
+            trusted_servitors: Vec::new(),
+            verify_servitor_profile: false,
+            assign_confirm_timeout_secs: default_assign_confirm_timeout(),
+            background_sse_enabled: default_background_sse(),
         }
     }
+}
+
+fn default_assign_confirm_timeout() -> u64 {
+    30
+}
+
+fn default_background_sse() -> bool {
+    true
+}
+
+fn default_compaction_token_budget() -> u64 {
+    80_000
+}
+
+fn default_preserve_recent_turns() -> usize {
+    10
 }
 
 fn default_max_turns() -> u32 {
@@ -422,6 +465,31 @@ impl DaemonConfig {
         }
         true
     }
+}
+
+/// Operator configuration — human proxy for task delegation.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OperatorConfig {
+    /// Human capabilities for task matching (e.g., ["code-review", "approval"]).
+    /// Empty = human proxy disabled.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Offer TTL for human work in seconds (default: 3600 = 1 hour).
+    #[serde(default = "default_operator_offer_ttl")]
+    pub offer_ttl_secs: u64,
+}
+
+impl Default for OperatorConfig {
+    fn default() -> Self {
+        Self {
+            capabilities: Vec::new(),
+            offer_ttl_secs: default_operator_offer_ttl(),
+        }
+    }
+}
+
+fn default_operator_offer_ttl() -> u64 {
+    3600
 }
 
 impl Config {

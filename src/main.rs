@@ -6,6 +6,7 @@ mod daemon;
 mod egregore;
 mod error;
 mod heartbeat;
+mod hooks;
 mod identity;
 mod mcp;
 mod profile;
@@ -202,8 +203,10 @@ async fn run(cli: Cli) -> Result<()> {
     let egregore_for_panes = egregore.clone();
 
     // Build conversation engine
+    let model_name = llm_config.model.clone();
     let conversation = Conversation::new(
         provider,
+        &model_name,
         mcp_pool,
         egregore,
         store,
@@ -222,10 +225,12 @@ async fn run(cli: Cli) -> Result<()> {
             let store_path = Config::expand_path(&config.store.path);
             let daemon = daemon::Daemon::new(
                 conversation,
+                egregore_for_panes.clone(),
                 config.egregore.api_url.clone(),
                 identity.public_id().to_string(),
                 store_path,
                 config.daemon.clone(),
+                config.agent.clone(),
             );
             tracing::info!("running as daemon");
             daemon.run().await?;

@@ -3,32 +3,45 @@
 //! This is the core of Familiar. Unlike servitor's task loop (stateless, reactive),
 //! this maintains dialogue state across turns and assembles personal context.
 
+use std::sync::Arc;
+
 use crate::agent::providers::{
-    ChatResponse, ContentBlock, Message, Provider, StopReason,
+    cache::CompletionCache, pricing, ContentBlock, Message, Provider, StopReason, StreamEvent,
 };
 use crate::config::{AgentConfig, ToolTrustConfig, TrustLevel};
 use crate::egregore::EgregoreClient;
 use crate::error::{FamiliarError, Result};
+use crate::hooks::{HookDecision, HookRunner};
 use crate::mcp::{LlmTool, McpPool};
 use crate::store::Store;
 use crate::workspace::Workspace;
 
-/// Token usage from a conversation turn.
+/// Callback for streaming text chunks. Arc-wrapped to satisfy async lifetime requirements.
+pub type TextCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Accumulated token usage across a conversation turn (may span multiple LLM calls).
 #[derive(Debug, Clone, Default)]
 pub struct ConversationUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub cache_write_tokens: u32,
+    pub reasoning_tokens: u32,
+    pub estimated_usd: f64,
 }
 
 /// Conversation engine — manages the dialogue loop.
 pub struct Conversation {
     provider: Box<dyn Provider>,
+    model_name: String,
     mcp_pool: McpPool,
     egregore: EgregoreClient,
     store: Store,
     config: AgentConfig,
     tool_trust: ToolTrustConfig,
     workspace: Workspace,
+    hooks: HookRunner,
+    completion_cache: Option<CompletionCache>,
     /// Whether this conversation is in a group channel (Discord guild, etc.)
     group_context: bool,
 }
@@ -36,6 +49,7 @@ pub struct Conversation {
 impl Conversation {
     pub fn new(
         provider: Box<dyn Provider>,
+        model_name: impl Into<String>,
         mcp_pool: McpPool,
         egregore: EgregoreClient,
         store: Store,
@@ -45,14 +59,27 @@ impl Conversation {
     ) -> Self {
         Self {
             provider,
+            model_name: model_name.into(),
             mcp_pool,
             egregore,
             store,
             config,
             tool_trust,
             workspace,
+            hooks: HookRunner::new(),
+            completion_cache: None,
             group_context: false,
         }
+    }
+
+    /// Set a pre-configured hook runner.
+    pub fn set_hooks(&mut self, hooks: HookRunner) {
+        self.hooks = hooks;
+    }
+
+    /// Enable completion response caching.
+    pub fn set_completion_cache(&mut self, cache: CompletionCache) {
+        self.completion_cache = Some(cache);
     }
 
     /// Set whether this conversation is in a group context.
@@ -77,11 +104,23 @@ impl Conversation {
         self.store.list_context()
     }
 
+    /// Get cost summary (for /cost command).
+    pub fn cost_summary(&self) -> Result<(f64, f64, u64, u64)> {
+        let daily = self.store.daily_cost()?;
+        let total = self.store.total_cost()?;
+        let (input_tokens, output_tokens) = self.store.total_tokens()?;
+        Ok((daily, total, input_tokens, output_tokens))
+    }
+
     /// Process a user message and return the assistant's response text.
+    ///
+    /// If `on_text` is provided, text chunks are streamed incrementally via
+    /// the provider's SSE streaming endpoint. Otherwise, responses arrive
+    /// in a single non-streaming call.
     pub async fn send(
         &self,
         user_input: &str,
-        on_text: Option<&dyn Fn(&str)>,
+        on_text: Option<TextCallback>,
     ) -> Result<(String, ConversationUsage)> {
         // Compact old turns if conversation is too long
         self.compact_if_needed().await;
@@ -94,7 +133,7 @@ impl Conversation {
         let tools = self.build_tools().await;
 
         // Run the tool-use loop
-        let (response_text, usage) = self.run_loop(messages, &tools, on_text).await?;
+        let (response_text, usage) = self.run_loop(messages, &tools, on_text.as_ref()).await?;
 
         // Save assistant response to local history
         self.store.add_turn("assistant", &response_text, None)?;
@@ -269,7 +308,7 @@ impl Conversation {
         &self,
         mut messages: Vec<Message>,
         tools: &[LlmTool],
-        on_text: Option<&dyn Fn(&str)>,
+        on_text: Option<&TextCallback>,
     ) -> Result<(String, ConversationUsage)> {
         let mut total_usage = ConversationUsage::default();
         let mut response_text = String::new();
@@ -285,14 +324,55 @@ impl Conversation {
                 tools
             };
 
-            let response = self
-                .provider
-                .chat(&self.system_prompt(), &messages, active_tools)
-                .await?;
+            let system = self.system_prompt();
+
+            // Check completion cache before calling provider
+            let cached = self.completion_cache.as_ref().and_then(|cache| {
+                cache.lookup(&self.model_name, &system, &messages, active_tools)
+            });
+
+            let response = if let Some(hit) = cached {
+                tracing::debug!("completion cache hit, skipping API call");
+                // Replay cached response through streaming callback if present
+                if let Some(cb) = on_text {
+                    let text = hit.text();
+                    if !text.is_empty() {
+                        cb(&text);
+                    }
+                }
+                hit
+            } else if let Some(cb) = on_text {
+                let cb = Arc::clone(cb);
+                let stream_cb = move |event: StreamEvent| {
+                    if let StreamEvent::TextDelta(ref text) = event {
+                        cb(text);
+                    }
+                };
+                let resp = self.provider
+                    .chat_stream(&system, &messages, active_tools, &stream_cb)
+                    .await?;
+
+                if let Some(cache) = &self.completion_cache {
+                    cache.store(&self.model_name, &system, &messages, active_tools, &resp);
+                }
+                resp
+            } else {
+                let resp = self.provider
+                    .chat(&system, &messages, active_tools)
+                    .await?;
+
+                if let Some(cache) = &self.completion_cache {
+                    cache.store(&self.model_name, &system, &messages, active_tools, &resp);
+                }
+                resp
+            };
 
             // Accumulate token usage.
             total_usage.input_tokens += response.usage.input_tokens;
             total_usage.output_tokens += response.usage.output_tokens;
+            total_usage.cache_read_tokens += response.usage.cache_read_tokens;
+            total_usage.cache_write_tokens += response.usage.cache_write_tokens;
+            total_usage.reasoning_tokens += response.usage.reasoning_tokens;
 
             // Handle truncation recovery
             if response.stop_reason == StopReason::MaxTokens {
@@ -321,12 +401,9 @@ impl Conversation {
             // Non-truncated response — reset counter
             truncation_count = 0;
 
-            // Collect text output and stream it to caller
+            // Collect final text (streaming already delivered chunks via callback)
             let text = response.text();
             if !text.is_empty() {
-                if let Some(cb) = on_text {
-                    cb(&text);
-                }
                 response_text = text.clone();
             }
 
@@ -385,63 +462,108 @@ impl Conversation {
             response_text = "(no response)".to_string();
         }
 
+        // Estimate cost and record usage
+        let token_usage = thallus_core::provider::TokenUsage {
+            input_tokens: total_usage.input_tokens,
+            output_tokens: total_usage.output_tokens,
+            cache_read_tokens: total_usage.cache_read_tokens,
+            cache_write_tokens: total_usage.cache_write_tokens,
+            reasoning_tokens: total_usage.reasoning_tokens,
+        };
+        let cost = pricing::estimate_cost_for_model(&self.model_name, &token_usage, None);
+        total_usage.estimated_usd = cost.total_usd;
+
+        if let Err(e) = self.store.record_usage(
+            &self.model_name,
+            total_usage.input_tokens,
+            total_usage.output_tokens,
+            total_usage.cache_read_tokens,
+            total_usage.cache_write_tokens,
+            total_usage.reasoning_tokens,
+            cost.total_usd,
+        ) {
+            tracing::warn!(error = %e, "failed to record usage");
+        }
+
+        tracing::info!(
+            input = total_usage.input_tokens,
+            output = total_usage.output_tokens,
+            cache_read = total_usage.cache_read_tokens,
+            cache_write = total_usage.cache_write_tokens,
+            cost_usd = format!("{:.6}", cost.total_usd),
+            "turn complete"
+        );
+
         Ok((response_text, total_usage))
     }
 
-    /// Compact conversation history if it exceeds 100 turns.
+    /// Compact conversation history when estimated token usage exceeds budget.
     ///
-    /// Takes the oldest 80 turns, asks the LLM to summarize them, saves the
-    /// summary as a system turn, and deletes the originals. On any failure,
-    /// logs a warning and continues — never loses data.
+    /// Uses token estimation (len/4) to decide when to compact. Preserves the
+    /// most recent N turns and summarizes everything else into a structured
+    /// system turn. On re-compaction, merges with the existing summary.
     async fn compact_if_needed(&self) {
-        let turn_count = match self.store.turn_count() {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!("failed to get turn count for compaction check: {}", e);
-                return;
-            }
-        };
+        use crate::agent::compaction;
 
-        if turn_count <= 100 {
-            return;
-        }
-
-        tracing::info!(turn_count, "conversation exceeds 100 turns, compacting");
-
-        let oldest = match self.store.oldest_turns(80) {
+        let all_turns = match self.store.recent_turns(10_000) {
             Ok(turns) => turns,
             Err(e) => {
-                tracing::warn!("failed to fetch oldest turns for compaction: {}", e);
+                tracing::warn!("failed to fetch turns for compaction check: {}", e);
                 return;
             }
         };
 
-        if oldest.is_empty() {
+        // Estimate total tokens across all turns
+        let total_tokens: u64 = all_turns
+            .iter()
+            .map(|t| compaction::estimate_tokens(&t.content))
+            .sum();
+
+        if total_tokens <= self.config.compaction_token_budget {
             return;
         }
 
-        // Build text from the oldest turns
-        let mut transcript = String::new();
-        for turn in &oldest {
-            transcript.push_str(&format!("[{}]: {}\n", turn.role, turn.content));
+        let preserve = self.config.preserve_recent_turns;
+        if all_turns.len() <= preserve {
+            return;
         }
 
-        // Ask the LLM for a summary — no tools, simple prompt
-        let summary_prompt = "Summarize the following conversation history into a concise \
-            recap that preserves key facts, decisions, and context. Be brief but complete.";
-        let summary_messages = vec![Message::user(format!(
-            "{}\n\n---\n\n{}",
-            summary_prompt, transcript
-        ))];
-        let empty_tools: Vec<LlmTool> = Vec::new();
+        let compact_count = all_turns.len() - preserve;
+        tracing::info!(
+            total_tokens,
+            compact_count,
+            preserve,
+            "token budget exceeded, compacting"
+        );
 
-        let summary = match self
-            .provider
-            .chat(&self.system_prompt(), &summary_messages, &empty_tools)
-            .await
+        let to_compact = &all_turns[..compact_count];
+
+        // Check if there's an existing summary (system turn from prior compaction)
+        let existing_summary = to_compact
+            .iter()
+            .filter(|t| t.role == "system")
+            .last()
+            .map(|t| t.content.as_str());
+
+        // Build turn pairs for compaction (exclude system summary turns)
+        let turn_pairs: Vec<(String, String)> = to_compact
+            .iter()
+            .filter(|t| t.role != "system")
+            .map(|t| (t.role.clone(), t.content.clone()))
+            .collect();
+
+        if turn_pairs.is_empty() {
+            return;
+        }
+
+        let summary = match compaction::compact(
+            self.provider.as_ref(),
+            &turn_pairs,
+            existing_summary,
+        )
+        .await
         {
-            Ok(response) => {
-                let text = response.text();
+            Ok(text) => {
                 if text.is_empty() {
                     tracing::warn!("LLM returned empty summary during compaction, aborting");
                     return;
@@ -455,18 +577,18 @@ impl Conversation {
         };
 
         // Save summary as a system turn
-        if let Err(e) = self.store.add_turn("system", &summary, None) {
+        let summary_with_prefix = format!("[Compacted Context]\n{}", summary);
+        if let Err(e) = self.store.add_turn("system", &summary_with_prefix, None) {
             tracing::warn!("failed to save compaction summary: {}", e);
             return;
         }
 
-        // Delete the old turns (use id of last oldest turn + 1 as cutoff)
-        let cutoff_id = oldest.last().unwrap().id + 1;
+        // Delete the compacted turns
+        let cutoff_id = to_compact.last().unwrap().id + 1;
         if let Err(e) = self.store.delete_turns_before(cutoff_id) {
             tracing::warn!("failed to delete old turns during compaction: {}", e);
-            // Summary was saved, so data is not lost even if delete fails
         } else {
-            tracing::info!(deleted = oldest.len(), "compaction complete");
+            tracing::info!(deleted = compact_count, "compaction complete");
         }
     }
 
@@ -500,7 +622,7 @@ impl Conversation {
             .any(|pattern| crate::config::glob_match(pattern, name))
     }
 
-    /// Execute a single tool call.
+    /// Execute a single tool call with pre/post hooks.
     async fn execute_tool(
         &self,
         name: &str,
@@ -517,6 +639,44 @@ impl Conversation {
             });
         }
 
+        // Run pre-tool-use hooks
+        let effective_input = match self.hooks.run_pre(name, input).await {
+            HookDecision::Allow => input.clone(),
+            HookDecision::Deny { reason } => {
+                return Err(FamiliarError::Internal {
+                    reason: format!("Tool '{}' blocked by hook: {}", name, reason),
+                });
+            }
+            HookDecision::ModifyInput(modified) => modified,
+        };
+
+        let result = self.execute_tool_inner(name, &effective_input).await;
+
+        // Run post-tool-use hooks
+        let (output, is_error) = match &result {
+            Ok(text) => (text.as_str(), false),
+            Err(e) => {
+                // Provide error string for post hooks, then propagate
+                let err_str = e.to_string();
+                self.hooks
+                    .run_post(name, &effective_input, &err_str, true)
+                    .await;
+                return result;
+            }
+        };
+        self.hooks
+            .run_post(name, &effective_input, output, is_error)
+            .await;
+
+        result
+    }
+
+    /// Inner tool execution logic (called after hooks).
+    async fn execute_tool_inner(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Result<String> {
         match name {
             "egregore_publish" => {
                 let content = input

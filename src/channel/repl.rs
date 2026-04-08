@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
-use super::{Channel, ChannelMessage};
+use super::{Channel, ChannelMessage, TaskDecision, TaskPresentation};
 use crate::config::ReplConfig;
 use crate::error::{FamiliarError, Result};
 
@@ -133,6 +133,38 @@ impl Channel for ReplChannel {
         print!("{}", chunk);
         let _ = std::io::stdout().flush();
         Ok(())
+    }
+
+    async fn present_task(&self, task: &TaskPresentation) -> Option<TaskDecision> {
+        use std::io::Write;
+
+        // Display task summary
+        println!("\n--- Network Task ---");
+        println!("  Requestor: {}", &task.requestor[..18.min(task.requestor.len())]);
+        println!("  Required:  {}", task.required_caps.join(", "));
+        if let Some(timeout) = task.timeout_secs {
+            println!("  Timeout:   {}s", timeout);
+        }
+        println!("  Prompt:    {}", &task.prompt[..80.min(task.prompt.len())]);
+        if task.prompt.len() > 80 {
+            println!("             ...");
+        }
+        print!("  Accept? [y/n] ");
+        let _ = std::io::stdout().flush();
+
+        // Read single line for accept/reject
+        let mut input = String::new();
+        match std::io::stdin().read_line(&mut input) {
+            Ok(_) => {
+                let trimmed = input.trim().to_lowercase();
+                if trimmed == "y" || trimmed == "yes" {
+                    Some(TaskDecision::Accept)
+                } else {
+                    Some(TaskDecision::Reject)
+                }
+            }
+            Err(_) => Some(TaskDecision::Reject),
+        }
     }
 }
 

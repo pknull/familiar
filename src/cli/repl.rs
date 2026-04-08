@@ -1,5 +1,7 @@
 //! Interactive session — drives a Channel + Conversation pair.
 
+use std::sync::Arc;
+
 use crate::agent::conversation::Conversation;
 use crate::channel::Channel;
 use crate::config::ReplConfig;
@@ -42,9 +44,24 @@ pub async fn run_session(
                     }
                     continue;
                 }
+                "/cost" => {
+                    match conversation.cost_summary() {
+                        Ok((daily, total, input_tok, output_tok)) => {
+                            let formatted = format!(
+                                "  Today:    ${:.4}\n  All-time: ${:.4}\n  Tokens:   {} input, {} output",
+                                daily, total, input_tok, output_tok
+                            );
+                            let _ = channel.respond(&formatted).await;
+                        }
+                        Err(e) => {
+                            let _ = channel.respond(&format!("error: {}", e)).await;
+                        }
+                    }
+                    continue;
+                }
                 "/help" => {
                     let _ = channel
-                        .respond("Commands:\n  /quit     Exit familiar\n  /context  Show saved personal context\n  /help     Show this help")
+                        .respond("Commands:\n  /quit     Exit familiar\n  /context  Show saved personal context\n  /cost     Show token usage and cost\n  /help     Show this help")
                         .await;
                     continue;
                 }
@@ -61,19 +78,21 @@ pub async fn run_session(
         // When the first LLM chunk arrives, stream_chunk clears it and
         // prints the familiar prompt prefix + chunk.
         let prefix = repl_config.familiar_prompt.clone();
-        let first_chunk = std::sync::atomic::AtomicBool::new(true);
+        let first_chunk = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let first_chunk_cb = Arc::clone(&first_chunk);
+
+        let stream_cb = Arc::new(move |chunk: &str| {
+            use std::io::Write;
+            if first_chunk_cb.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                print!("\r\x1b[2K\n{}{}", prefix, chunk);
+            } else {
+                print!("{}", chunk);
+            }
+            let _ = std::io::stdout().flush();
+        });
 
         match conversation
-            .send(input, Some(&|chunk| {
-                use std::io::Write;
-                if first_chunk.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                    // First chunk: clear thinking, print prefix
-                    print!("\r\x1b[2K\n{}{}", prefix, chunk);
-                } else {
-                    print!("{}", chunk);
-                }
-                let _ = std::io::stdout().flush();
-            }))
+            .send(input, Some(stream_cb))
             .await
         {
             Ok(_) => {

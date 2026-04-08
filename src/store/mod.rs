@@ -7,6 +7,7 @@ pub mod context;
 pub mod conversations;
 pub mod sessions;
 pub mod snapshots;
+pub mod usage;
 
 use std::path::Path;
 
@@ -216,6 +217,21 @@ impl Store {
 
             CREATE INDEX IF NOT EXISTS idx_snapshots_session
                 ON snapshots(session_id);
+
+            CREATE TABLE IF NOT EXISTS usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                estimated_usd REAL NOT NULL DEFAULT 0.0,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_usage_created
+                ON usage(created_at);
             ",
         )?;
 

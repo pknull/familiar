@@ -23,6 +23,28 @@ pub struct ChannelMessage {
     pub channel_id: String,
 }
 
+/// A network task presented to the operator for accept/reject.
+#[derive(Debug, Clone)]
+pub struct TaskPresentation {
+    /// Hash of the task message (correlation key).
+    pub task_hash: String,
+    /// Public ID of the task requestor.
+    pub requestor: String,
+    /// Task prompt / description.
+    pub prompt: String,
+    /// Required capabilities.
+    pub required_caps: Vec<String>,
+    /// Task timeout in seconds (if specified).
+    pub timeout_secs: Option<u64>,
+}
+
+/// Operator's decision on a presented task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskDecision {
+    Accept,
+    Reject,
+}
+
 /// Channel trait — abstracts I/O for different transports.
 ///
 /// Implement this for REPL, Discord, Slack, HTTP, Matrix, etc.
@@ -42,4 +64,12 @@ pub trait Channel: Send {
     /// Send a streaming text chunk (partial response).
     /// For REPL this prints immediately. For Discord this might edit a message.
     async fn stream_chunk(&self, chunk: &str) -> Result<()>;
+
+    /// Present a network task to the operator for accept/reject decision.
+    ///
+    /// Returns `Some(decision)` if the channel supports task presentation,
+    /// or `None` if the channel is headless (daemon mode).
+    async fn present_task(&self, _task: &TaskPresentation) -> Option<TaskDecision> {
+        None // Default: headless, no operator interaction
+    }
 }

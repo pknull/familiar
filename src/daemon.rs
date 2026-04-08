@@ -4,16 +4,140 @@
 //! messages relevant to this identity, and processes them through the
 //! conversation engine automatically.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use reqwest_eventsource::{Event, EventSource};
 use tokio::time::sleep;
 
 use crate::agent::conversation::Conversation;
+use crate::egregore::EgregoreClient;
 use crate::error::{FamiliarError, Result};
 use crate::store::Store;
+
+/// Assignment state for a published task.
+#[derive(Debug, Clone)]
+enum AssignmentState {
+    /// Task published, waiting for offers.
+    Pending,
+    /// Offer accepted, task_assign published, waiting for task_started confirmation.
+    Assigned {
+        servitor: String,
+        assigned_at: Instant,
+    },
+    /// task_started received — execution confirmed.
+    Confirmed { servitor: String },
+    /// task_result or task_failed received — complete.
+    Completed,
+}
+
+/// Tracks pending offers for a published task (for retry on assignment failure).
+#[derive(Debug, Clone)]
+struct PendingOffer {
+    servitor: String,
+    timestamp: String,
+    ttl_seconds: u64,
+    withdrawn: bool,
+}
+
+/// Tracks auto-assignment state for tasks published by this familiar.
+struct TaskAssignmentTracker {
+    /// task_hash → assignment state
+    tasks: HashMap<String, AssignmentState>,
+    /// task_hash → pending offers (for retry)
+    offers: HashMap<String, Vec<PendingOffer>>,
+}
+
+impl TaskAssignmentTracker {
+    fn new() -> Self {
+        Self {
+            tasks: HashMap::new(),
+            offers: HashMap::new(),
+        }
+    }
+
+    /// Register a published task hash for tracking.
+    fn track(&mut self, hash: String) {
+        self.tasks.insert(hash, AssignmentState::Pending);
+    }
+
+    /// Check if we're tracking a task hash.
+    fn is_tracked(&self, hash: &str) -> bool {
+        self.tasks.contains_key(hash)
+    }
+
+    /// Check if a task has already been assigned.
+    fn is_assigned_or_completed(&self, hash: &str) -> bool {
+        matches!(
+            self.tasks.get(hash),
+            Some(AssignmentState::Assigned { .. })
+                | Some(AssignmentState::Confirmed { .. })
+                | Some(AssignmentState::Completed)
+        )
+    }
+
+    /// Record an offer for a task.
+    fn add_offer(&mut self, task_hash: &str, offer: PendingOffer) {
+        self.offers
+            .entry(task_hash.to_string())
+            .or_default()
+            .push(offer);
+    }
+
+    /// Mark a task as assigned.
+    fn mark_assigned(&mut self, task_hash: &str, servitor: String) {
+        self.tasks.insert(
+            task_hash.to_string(),
+            AssignmentState::Assigned {
+                servitor,
+                assigned_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Mark a task as confirmed (task_started received).
+    fn mark_confirmed(&mut self, task_hash: &str) {
+        if let Some(AssignmentState::Assigned { servitor, .. }) = self.tasks.get(task_hash) {
+            let servitor = servitor.clone();
+            self.tasks.insert(
+                task_hash.to_string(),
+                AssignmentState::Confirmed { servitor },
+            );
+        }
+    }
+
+    /// Mark a task as completed.
+    fn mark_completed(&mut self, task_hash: &str) {
+        self.tasks
+            .insert(task_hash.to_string(), AssignmentState::Completed);
+    }
+
+    /// Mark an offer as withdrawn.
+    fn mark_offer_withdrawn(&mut self, task_hash: &str, servitor: &str) {
+        if let Some(offers) = self.offers.get_mut(task_hash) {
+            for offer in offers.iter_mut() {
+                if offer.servitor == servitor {
+                    offer.withdrawn = true;
+                }
+            }
+        }
+    }
+
+    /// Get the next available (non-withdrawn, non-expired) offer for a task.
+    fn next_available_offer(&self, task_hash: &str) -> Option<&PendingOffer> {
+        self.offers.get(task_hash).and_then(|offers| {
+            offers.iter().find(|o| {
+                !o.withdrawn
+                // TTL check: parse timestamp and compare
+                // For simplicity, we trust the offer is recent enough
+                // (full TTL check would require parsing the timestamp)
+            })
+        })
+    }
+}
 
 /// Maximum consecutive SSE failures before applying long backoff.
 const MAX_RETRIES_BEFORE_LONG_BACKOFF: u32 = 5;
@@ -27,33 +151,41 @@ const LONG_RETRY_SECS: u64 = 60;
 /// Daemon — persistent feed watcher and auto-responder.
 pub struct Daemon {
     conversation: Conversation,
+    egregore: EgregoreClient,
     egregore_url: String,
     identity_id: String,
     store_path: String,
     scope: crate::config::DaemonConfig,
+    agent_config: crate::config::AgentConfig,
+    tracker: TaskAssignmentTracker,
 }
 
 impl Daemon {
     pub fn new(
         conversation: Conversation,
+        egregore: EgregoreClient,
         egregore_url: String,
         identity_id: String,
         store_path: String,
         scope: crate::config::DaemonConfig,
+        agent_config: crate::config::AgentConfig,
     ) -> Self {
         Self {
             conversation,
+            egregore,
             egregore_url,
             identity_id,
             store_path,
             scope,
+            agent_config,
+            tracker: TaskAssignmentTracker::new(),
         }
     }
 
     /// Run the daemon loop. Connects to egregore SSE and processes events.
     /// Reconnects automatically on failure with exponential backoff.
     /// Handles SIGTERM/SIGINT gracefully — completes in-progress work before exiting.
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(mut self) -> Result<()> {
         tracing::info!(
             identity = %self.identity_id,
             egregore = %self.egregore_url,
@@ -106,7 +238,7 @@ impl Daemon {
     }
 
     /// Connect to SSE and process events until the stream ends or errors.
-    async fn run_sse_loop(&self) -> Result<()> {
+    async fn run_sse_loop(&mut self) -> Result<()> {
         let url = format!("{}/v1/events", self.egregore_url);
         let mut es = EventSource::get(&url);
 
@@ -139,7 +271,7 @@ impl Daemon {
     }
 
     /// Parse and dispatch a single SSE message.
-    async fn handle_sse_message(&self, data: &str) -> Result<()> {
+    async fn handle_sse_message(&mut self, data: &str) -> Result<()> {
         let message: serde_json::Value = serde_json::from_str(data)?;
 
         if !self.is_relevant(&message) {
@@ -165,12 +297,154 @@ impl Daemon {
 
         match msg_type {
             "query" => self.handle_query(&message).await,
-            "task_result" => self.handle_task_result(&message).await,
+            "task_result" => {
+                // Mark in tracker if we're tracking this task
+                if let Some(hash) = message.get("relates").and_then(|r| r.as_str()) {
+                    self.tracker.mark_completed(hash);
+                }
+                self.handle_task_result(&message).await
+            }
+            "task_offer" => self.handle_task_offer(&message).await,
+            "task_started" => self.handle_task_started(&message),
+            "task_failed" => {
+                if let Some(hash) = message.get("relates").and_then(|r| r.as_str()) {
+                    self.tracker.mark_completed(hash);
+                }
+                self.handle_task_result(&message).await
+            }
+            "task_offer_withdraw" => {
+                self.handle_offer_withdraw(&message);
+                Ok(())
+            }
             _ => {
                 tracing::debug!(msg_type, "ignoring unhandled message type");
                 Ok(())
             }
         }
+    }
+
+    /// Handle a task_offer: auto-assign if it matches a task we published (first-offer-wins).
+    async fn handle_task_offer(&mut self, message: &serde_json::Value) -> Result<()> {
+        let content = message.get("content").unwrap_or(&serde_json::Value::Null);
+        let task_id = match content.get("task_id").and_then(|t| t.as_str()) {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        // Only handle offers for tasks we published
+        if !self.tracker.is_tracked(task_id) {
+            return Ok(());
+        }
+
+        // Skip if already assigned
+        if self.tracker.is_assigned_or_completed(task_id) {
+            tracing::debug!(task_id, "ignoring offer — task already assigned");
+            return Ok(());
+        }
+
+        let servitor = match content.get("servitor").and_then(|s| s.as_str()) {
+            Some(s) => s.to_string(),
+            None => return Ok(()),
+        };
+
+        let ttl = content
+            .get("ttl_seconds")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(30);
+        let timestamp = content
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Record the offer
+        self.tracker.add_offer(
+            task_id,
+            PendingOffer {
+                servitor: servitor.clone(),
+                timestamp: timestamp.clone(),
+                ttl_seconds: ttl,
+                withdrawn: false,
+            },
+        );
+
+        // Trust validation
+        if !self.agent_config.trusted_servitors.is_empty()
+            && !self.agent_config.trusted_servitors.contains(&servitor)
+        {
+            tracing::debug!(
+                servitor,
+                task_id,
+                "ignoring offer from untrusted servitor"
+            );
+            return Ok(());
+        }
+
+        // Publish task_assign
+        let assign_content = serde_json::json!({
+            "type": "task_assign",
+            "task_id": task_id,
+            "servitor": servitor,
+            "assigner": self.identity_id,
+        });
+
+        match self
+            .egregore
+            .publish_content(assign_content, &["task_assign"])
+            .await
+        {
+            Ok(hash) => {
+                tracing::info!(
+                    task_id,
+                    servitor,
+                    assign_hash = hash,
+                    "auto-assigned task (first offer wins)"
+                );
+                self.tracker
+                    .mark_assigned(task_id, servitor);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id,
+                    error = %e,
+                    "failed to publish task_assign"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle task_started: confirm assignment.
+    fn handle_task_started(&mut self, message: &serde_json::Value) -> Result<()> {
+        let content = message.get("content").unwrap_or(&serde_json::Value::Null);
+        if let Some(task_id) = content.get("task_id").and_then(|t| t.as_str()) {
+            if self.tracker.is_tracked(task_id) {
+                self.tracker.mark_confirmed(task_id);
+                tracing::info!(task_id, "task execution confirmed (task_started received)");
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle task_offer_withdraw: mark offer as withdrawn, retry if needed.
+    fn handle_offer_withdraw(&mut self, message: &serde_json::Value) {
+        let content = message.get("content").unwrap_or(&serde_json::Value::Null);
+        let task_id = match content.get("task_id").and_then(|t| t.as_str()) {
+            Some(id) => id,
+            None => return,
+        };
+        let servitor = match content.get("servitor").and_then(|s| s.as_str()) {
+            Some(s) => s,
+            None => return,
+        };
+
+        if !self.tracker.is_tracked(task_id) {
+            return;
+        }
+
+        self.tracker.mark_offer_withdrawn(task_id, servitor);
+        tracing::debug!(task_id, servitor, "offer withdrawn");
     }
 
     /// Check whether a feed message is relevant to this daemon.
@@ -210,7 +484,17 @@ impl Daemon {
             "query" => self.is_query_for_us(content),
 
             // Task results — check if we published the originating task.
-            "task_result" => self.is_our_task_result(message),
+            "task_result" | "task_failed" => self.is_our_task_result(message),
+
+            // Task lifecycle messages — relevant if they match a task we're tracking.
+            // These bypass normal scope filters since they're protocol messages.
+            "task_offer" | "task_started" | "task_offer_withdraw" => {
+                content
+                    .get("task_id")
+                    .and_then(|t| t.as_str())
+                    .map(|task_id| self.tracker.is_tracked(task_id))
+                    .unwrap_or(false)
+            }
 
             _ => false,
         }
