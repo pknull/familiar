@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use reqwest_eventsource::{Event, EventSource};
 use tokio::time::sleep;
@@ -17,6 +16,7 @@ use crate::agent::conversation::Conversation;
 use crate::egregore::EgregoreClient;
 use crate::error::{FamiliarError, Result};
 use crate::store::Store;
+use crate::workspace::heartbeat::{self as heartbeat_config, Trigger};
 
 /// Assignment state for a published task.
 #[derive(Debug, Clone)]
@@ -41,6 +41,32 @@ struct PendingOffer {
     timestamp: String,
     ttl_seconds: u64,
     withdrawn: bool,
+}
+
+/// Recently observed servitor profile used for offer verification.
+#[derive(Debug, Clone)]
+struct ObservedServitorProfile {
+    author: String,
+    servitor_id: String,
+    timestamp: String,
+    manifest_ref: Option<String>,
+}
+
+/// Recently observed servitor manifest used for planner-basis verification.
+#[derive(Debug, Clone)]
+struct ObservedServitorManifest {
+    hash: String,
+    servitor_id: String,
+    target_ids: Vec<String>,
+}
+
+/// Recently observed environment snapshot used for planner-basis verification.
+#[derive(Debug, Clone)]
+struct ObservedEnvironmentSnapshot {
+    hash: String,
+    servitor_id: String,
+    target_id: String,
+    manifest_ref: String,
 }
 
 /// Tracks auto-assignment state for tasks published by this familiar.
@@ -158,6 +184,11 @@ pub struct Daemon {
     scope: crate::config::DaemonConfig,
     agent_config: crate::config::AgentConfig,
     tracker: TaskAssignmentTracker,
+    servitor_profiles: HashMap<String, ObservedServitorProfile>,
+    servitor_manifests: HashMap<String, ObservedServitorManifest>,
+    environment_snapshots: HashMap<String, ObservedEnvironmentSnapshot>,
+    /// SSE-driven triggers loaded from HEARTBEAT.md.
+    sse_triggers: Vec<Trigger>,
 }
 
 impl Daemon {
@@ -170,6 +201,26 @@ impl Daemon {
         scope: crate::config::DaemonConfig,
         agent_config: crate::config::AgentConfig,
     ) -> Self {
+        // Load HEARTBEAT.md triggers for SSE-driven proactive behavior
+        let workspace_dir = crate::config::Config::expand_path("~/.familiar/workspace");
+        let heartbeat_path = std::path::Path::new(&workspace_dir).join("HEARTBEAT.md");
+        let sse_triggers = match std::fs::read_to_string(&heartbeat_path) {
+            Ok(content) => {
+                let config = heartbeat_config::parse(&content);
+                let triggers: Vec<Trigger> = config.triggers.into_iter()
+                    .filter(|t| t.is_sse())
+                    .collect();
+                if !triggers.is_empty() {
+                    tracing::info!(count = triggers.len(), "loaded SSE triggers from HEARTBEAT.md");
+                }
+                triggers
+            }
+            Err(_) => {
+                tracing::debug!("no HEARTBEAT.md found, SSE triggers disabled");
+                Vec::new()
+            }
+        };
+
         Self {
             conversation,
             egregore,
@@ -179,6 +230,10 @@ impl Daemon {
             scope,
             agent_config,
             tracker: TaskAssignmentTracker::new(),
+            servitor_profiles: HashMap::new(),
+            servitor_manifests: HashMap::new(),
+            environment_snapshots: HashMap::new(),
+            sse_triggers,
         }
     }
 
@@ -274,6 +329,11 @@ impl Daemon {
     async fn handle_sse_message(&mut self, data: &str) -> Result<()> {
         let message: serde_json::Value = serde_json::from_str(data)?;
 
+        // Evaluate SSE triggers against every message (before relevance filter)
+        if !self.sse_triggers.is_empty() {
+            self.evaluate_sse_triggers(&message);
+        }
+
         if !self.is_relevant(&message) {
             return Ok(());
         }
@@ -297,9 +357,21 @@ impl Daemon {
 
         match msg_type {
             "query" => self.handle_query(&message).await,
+            "servitor_profile" => {
+                self.handle_servitor_profile(&message);
+                Ok(())
+            }
+            "servitor_manifest" => {
+                self.handle_servitor_manifest(&message);
+                Ok(())
+            }
+            "environment_snapshot" => {
+                self.handle_environment_snapshot(&message);
+                Ok(())
+            }
             "task_result" => {
                 // Mark in tracker if we're tracking this task
-                if let Some(hash) = message.get("relates").and_then(|r| r.as_str()) {
+                if let Some(hash) = self.result_task_id(&message) {
                     self.tracker.mark_completed(hash);
                 }
                 self.handle_task_result(&message).await
@@ -307,7 +379,7 @@ impl Daemon {
             "task_offer" => self.handle_task_offer(&message).await,
             "task_started" => self.handle_task_started(&message),
             "task_failed" => {
-                if let Some(hash) = message.get("relates").and_then(|r| r.as_str()) {
+                if let Some(hash) = self.result_task_id(&message) {
                     self.tracker.mark_completed(hash);
                 }
                 self.handle_task_result(&message).await
@@ -331,9 +403,15 @@ impl Daemon {
             None => return Ok(()),
         };
 
-        // Only handle offers for tasks we published
+        // Only handle offers for tasks we published.
+        // The in-memory tracker is best-effort; fall back to the local publish
+        // log so daemon restarts or non-daemon publishes do not lose correlation.
         if !self.tracker.is_tracked(task_id) {
-            return Ok(());
+            if self.is_our_task_id(task_id) {
+                self.tracker.track(task_id.to_string());
+            } else {
+                return Ok(());
+            }
         }
 
         // Skip if already assigned
@@ -380,6 +458,17 @@ impl Daemon {
             return Ok(());
         }
 
+        if self.agent_config.verify_servitor_profile
+            && !self.offer_matches_planner_basis(task_id, &servitor).await?
+        {
+            tracing::debug!(
+                servitor,
+                task_id,
+                "ignoring offer without matching servitor_profile"
+            );
+            return Ok(());
+        }
+
         // Publish task_assign
         let assign_content = serde_json::json!({
             "type": "task_assign",
@@ -413,6 +502,102 @@ impl Daemon {
         }
 
         Ok(())
+    }
+
+    /// Cache a recently observed servitor profile for later offer verification.
+    fn handle_servitor_profile(&mut self, message: &serde_json::Value) {
+        let author = match message.get("author").and_then(|a| a.as_str()) {
+            Some(author) => author.to_string(),
+            None => return,
+        };
+        let timestamp = message
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+        let content = message.get("content").unwrap_or(&serde_json::Value::Null);
+        let servitor_id = content
+            .get("servitor_id")
+            .and_then(|s| s.as_str())
+            .unwrap_or(&author)
+            .to_string();
+
+        self.servitor_profiles.insert(
+            servitor_id.clone(),
+            ObservedServitorProfile {
+                author,
+                servitor_id,
+                timestamp,
+                manifest_ref: content
+                    .get("manifest_ref")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            },
+        );
+    }
+
+    /// Cache a recently observed servitor manifest.
+    fn handle_servitor_manifest(&mut self, message: &serde_json::Value) {
+        let hash = match message.get("hash").and_then(|h| h.as_str()) {
+            Some(hash) => hash.to_string(),
+            None => return,
+        };
+        let content = message.get("content").unwrap_or(&serde_json::Value::Null);
+        let servitor_id = match content.get("servitor_id").and_then(|s| s.as_str()) {
+            Some(servitor_id) => servitor_id.to_string(),
+            None => return,
+        };
+        let target_ids = content
+            .get("deployment_targets")
+            .and_then(|targets| targets.as_array())
+            .map(|targets| {
+                targets
+                    .iter()
+                    .filter_map(|target| target.get("target_id").and_then(|v| v.as_str()))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        self.servitor_manifests.insert(
+            hash.clone(),
+            ObservedServitorManifest {
+                hash,
+                servitor_id,
+                target_ids,
+            },
+        );
+    }
+
+    /// Cache a recently observed environment snapshot.
+    fn handle_environment_snapshot(&mut self, message: &serde_json::Value) {
+        let hash = match message.get("hash").and_then(|h| h.as_str()) {
+            Some(hash) => hash.to_string(),
+            None => return,
+        };
+        let content = message.get("content").unwrap_or(&serde_json::Value::Null);
+        let servitor_id = match content.get("servitor_id").and_then(|s| s.as_str()) {
+            Some(servitor_id) => servitor_id.to_string(),
+            None => return,
+        };
+        let target_id = match content.get("target_id").and_then(|s| s.as_str()) {
+            Some(target_id) => target_id.to_string(),
+            None => return,
+        };
+        let manifest_ref = match content.get("manifest_ref").and_then(|s| s.as_str()) {
+            Some(manifest_ref) => manifest_ref.to_string(),
+            None => return,
+        };
+
+        self.environment_snapshots.insert(
+            hash.clone(),
+            ObservedEnvironmentSnapshot {
+                hash,
+                servitor_id,
+                target_id,
+                manifest_ref,
+            },
+        );
     }
 
     /// Handle task_started: confirm assignment.
@@ -483,6 +668,13 @@ impl Daemon {
             // Queries from other agents — we may want to respond.
             "query" => self.is_query_for_us(content),
 
+            // Planner-visible executor profiles may be needed for offer verification.
+            "servitor_profile" => {
+                self.agent_config.verify_servitor_profile
+                    || !self.agent_config.trusted_servitors.is_empty()
+            }
+            "servitor_manifest" | "environment_snapshot" => self.agent_config.verify_servitor_profile,
+
             // Task results — check if we published the originating task.
             "task_result" | "task_failed" => self.is_our_task_result(message),
 
@@ -492,11 +684,25 @@ impl Daemon {
                 content
                     .get("task_id")
                     .and_then(|t| t.as_str())
-                    .map(|task_id| self.tracker.is_tracked(task_id))
+                    .map(|task_id| self.is_our_task_id(task_id))
                     .unwrap_or(false)
             }
 
             _ => false,
+        }
+    }
+
+    fn is_our_task_id(&self, task_id: &str) -> bool {
+        if self.tracker.is_tracked(task_id) {
+            return true;
+        }
+
+        match Store::open(Path::new(&self.store_path)) {
+            Ok(store) => store.has_published_hash(task_id).unwrap_or(false),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to open store for task check");
+                false
+            }
         }
     }
 
@@ -524,7 +730,7 @@ impl Daemon {
 
     /// Check if a task_result relates to a task we published.
     fn is_our_task_result(&self, message: &serde_json::Value) -> bool {
-        let relates_to = match message.get("relates").and_then(|r| r.as_str()) {
+        let relates_to = match self.result_task_id(message) {
             Some(hash) => hash,
             None => return false,
         };
@@ -539,8 +745,170 @@ impl Daemon {
         }
     }
 
+    fn result_task_id<'a>(&self, message: &'a serde_json::Value) -> Option<&'a str> {
+        message
+            .get("relates")
+            .and_then(|r| r.as_str())
+            .or_else(|| {
+                message
+                    .get("content")
+                    .and_then(|c| c.get("task_id"))
+                    .and_then(|t| t.as_str())
+            })
+    }
+
+    fn planner_basis_for_task(&self, task_id: &str) -> Result<Option<serde_json::Value>> {
+        let store = Store::open(Path::new(&self.store_path))?;
+        let metadata = match store.published_metadata(task_id)? {
+            Some(metadata) => metadata,
+            None => return Ok(None),
+        };
+
+        Ok(metadata
+            .get("context")
+            .and_then(|ctx| ctx.get("planner_basis"))
+            .cloned())
+    }
+
+    async fn offer_matches_planner_basis(&mut self, task_id: &str, servitor: &str) -> Result<bool> {
+        if !self.has_matching_servitor_profile(servitor).await? {
+            return Ok(false);
+        }
+
+        let Some(planner_basis) = self.planner_basis_for_task(task_id)? else {
+            return Ok(true);
+        };
+
+        let manifest_ref = planner_basis
+            .get("manifest_ref")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let target_id = planner_basis
+            .get("target_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let snapshot_ref = planner_basis
+            .get("snapshot_ref")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        if let Some(manifest_ref) = manifest_ref.as_deref() {
+            let Some(profile) = self.servitor_profiles.get(servitor) else {
+                return Ok(false);
+            };
+            if profile.manifest_ref.as_deref() != Some(manifest_ref) {
+                return Ok(false);
+            }
+
+            if let Some(target_id) = target_id.as_deref() {
+                if !self.manifest_contains_target(servitor, manifest_ref, target_id).await? {
+                    return Ok(false);
+                }
+            }
+        }
+
+        if let Some(snapshot_ref) = snapshot_ref.as_deref() {
+            if !self.snapshot_matches(servitor, snapshot_ref, manifest_ref.as_deref(), target_id.as_deref()).await? {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    async fn has_matching_servitor_profile(&mut self, servitor: &str) -> Result<bool> {
+        if let Some(profile) = self.servitor_profiles.get(servitor) {
+            if profile.servitor_id == servitor {
+                tracing::debug!(
+                    servitor,
+                    profile_author = %profile.author,
+                    profile_timestamp = %profile.timestamp,
+                    "using cached servitor_profile for verification"
+                );
+                return Ok(true);
+            }
+        }
+
+        let messages = self
+            .egregore
+            .query_messages(Some(servitor), Some("servitor_profile"), None, None, 5)
+            .await?;
+
+        for message in messages {
+            self.handle_servitor_profile(&message);
+            if let Some(profile) = self.servitor_profiles.get(servitor) {
+                if profile.servitor_id == servitor {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    async fn manifest_contains_target(
+        &mut self,
+        servitor: &str,
+        manifest_ref: &str,
+        target_id: &str,
+    ) -> Result<bool> {
+        if let Some(manifest) = self.servitor_manifests.get(manifest_ref) {
+            return Ok(manifest.servitor_id == servitor
+                && manifest.target_ids.iter().any(|target| target == target_id));
+        }
+
+        let messages = self
+            .egregore
+            .query_messages(Some(servitor), Some("servitor_manifest"), None, None, 10)
+            .await?;
+        for message in messages {
+            self.handle_servitor_manifest(&message);
+        }
+
+        Ok(self
+            .servitor_manifests
+            .get(manifest_ref)
+            .map(|manifest| {
+                manifest.servitor_id == servitor
+                    && manifest.target_ids.iter().any(|target| target == target_id)
+            })
+            .unwrap_or(false))
+    }
+
+    async fn snapshot_matches(
+        &mut self,
+        servitor: &str,
+        snapshot_ref: &str,
+        manifest_ref: Option<&str>,
+        target_id: Option<&str>,
+    ) -> Result<bool> {
+        if let Some(snapshot) = self.environment_snapshots.get(snapshot_ref) {
+            return Ok(snapshot.servitor_id == servitor
+                && manifest_ref.map(|value| snapshot.manifest_ref == value).unwrap_or(true)
+                && target_id.map(|value| snapshot.target_id == value).unwrap_or(true));
+        }
+
+        let messages = self
+            .egregore
+            .query_messages(Some(servitor), Some("environment_snapshot"), None, None, 10)
+            .await?;
+        for message in messages {
+            self.handle_environment_snapshot(&message);
+        }
+
+        Ok(self
+            .environment_snapshots
+            .get(snapshot_ref)
+            .map(|snapshot| {
+                snapshot.servitor_id == servitor
+                    && manifest_ref.map(|value| snapshot.manifest_ref == value).unwrap_or(true)
+                    && target_id.map(|value| snapshot.target_id == value).unwrap_or(true)
+            })
+            .unwrap_or(false))
+    }
+
     /// Handle an incoming query by running it through the conversation engine.
-    async fn handle_query(&self, message: &serde_json::Value) -> Result<()> {
+    async fn handle_query(&mut self, message: &serde_json::Value) -> Result<()> {
         let content = message
             .get("content")
             .ok_or_else(|| FamiliarError::Internal {
@@ -587,6 +955,60 @@ impl Daemon {
         }
 
         Ok(())
+    }
+
+    /// Evaluate SSE triggers against a feed message.
+    fn evaluate_sse_triggers(&self, message: &serde_json::Value) {
+        let content = match message.get("content") {
+            Some(c) => c,
+            None => return,
+        };
+
+        let msg_type = content.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let author = message.get("author").and_then(|a| a.as_str()).unwrap_or("");
+
+        // Build event fields from message for trigger matching
+        let mut fields: Vec<(&str, &str)> = vec![
+            ("content_type", msg_type),
+            ("author", author),
+        ];
+
+        // Add status if present (common in task_result/task_failed)
+        let status_str;
+        if let Some(status) = content.get("status").and_then(|s| s.as_str()) {
+            status_str = status.to_string();
+            fields.push(("status", &status_str));
+        }
+
+        for trigger in &self.sse_triggers {
+            if trigger.matches_event(&fields) {
+                tracing::info!(
+                    action = %trigger.action,
+                    msg_type,
+                    author,
+                    "SSE trigger fired"
+                );
+
+                // Append to daily log
+                let workspace_dir = crate::config::Config::expand_path("~/.familiar/workspace/daily");
+                let daily_dir = std::path::Path::new(&workspace_dir);
+                if !daily_dir.exists() {
+                    let _ = std::fs::create_dir_all(daily_dir);
+                }
+                let today = chrono::Local::now().format("%Y-%m-%d");
+                let log_path = daily_dir.join(format!("{}.md", today));
+                let entry = format!(
+                    "- [{}] trigger:{} fired (type={}, author={})\n",
+                    chrono::Local::now().format("%H:%M"),
+                    trigger.action,
+                    msg_type,
+                    author,
+                );
+                let mut content = std::fs::read_to_string(&log_path).unwrap_or_default();
+                content.push_str(&entry);
+                let _ = std::fs::write(&log_path, content);
+            }
+        }
     }
 
     /// Handle an incoming task result — log it locally and optionally notify.

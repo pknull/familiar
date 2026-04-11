@@ -2,15 +2,19 @@
 //!
 //! Runs a background loop that reads a checklist from the store,
 //! asks the LLM to evaluate it, and prints actionable items.
+//! Also evaluates scheduled triggers from HEARTBEAT.md and
+//! triggers daily compaction at day boundaries.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::Timelike;
+use chrono::{Datelike, Local, Timelike};
 use tokio::time;
 
 use crate::agent::providers::{Message, Provider};
 use crate::store::Store;
+use crate::workspace::heartbeat::{self as heartbeat_config, Trigger};
 
 const SYSTEM_PROMPT: &str =
     "You are running a periodic health check. Review the following checklist items \
@@ -25,6 +29,12 @@ pub struct Heartbeat {
     interval: Duration,
     quiet_start: u32,
     quiet_end: u32,
+    /// Scheduled triggers from HEARTBEAT.md (heartbeat-driven only).
+    triggers: Vec<Trigger>,
+    /// Last run date per trigger action (for schedule enforcement).
+    trigger_last_run: HashMap<String, chrono::NaiveDate>,
+    /// Last date compaction was triggered.
+    last_compaction_date: Option<chrono::NaiveDate>,
 }
 
 impl Heartbeat {
@@ -37,6 +47,23 @@ impl Heartbeat {
         quiet_start: u32,
         quiet_end: u32,
     ) -> Self {
+        // Load HEARTBEAT.md for scheduled triggers
+        let workspace_dir = crate::config::Config::expand_path("~/.familiar/workspace");
+        let heartbeat_path = std::path::Path::new(&workspace_dir).join("HEARTBEAT.md");
+        let triggers = match std::fs::read_to_string(&heartbeat_path) {
+            Ok(content) => {
+                let config = heartbeat_config::parse(&content);
+                let filtered: Vec<Trigger> = config.triggers.into_iter()
+                    .filter(|t| t.is_heartbeat())
+                    .collect();
+                if !filtered.is_empty() {
+                    tracing::info!(count = filtered.len(), "loaded heartbeat triggers from HEARTBEAT.md");
+                }
+                filtered
+            }
+            Err(_) => Vec::new(),
+        };
+
         Self {
             provider,
             store_path,
@@ -44,11 +71,14 @@ impl Heartbeat {
             interval,
             quiet_start,
             quiet_end,
+            triggers,
+            trigger_last_run: HashMap::new(),
+            last_compaction_date: None,
         }
     }
 
     /// Run the heartbeat loop. This never returns under normal operation.
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         let mut ticker = time::interval(self.interval);
 
         // First tick fires immediately — skip it so we don't check on startup.
@@ -64,13 +94,24 @@ impl Heartbeat {
     }
 
     /// Execute a single heartbeat tick.
-    async fn tick(&self) -> crate::error::Result<()> {
+    async fn tick(&mut self) -> crate::error::Result<()> {
         // Check quiet hours
-        let hour = chrono::Local::now().hour();
+        let now = Local::now();
+        let hour = now.hour();
         if self.in_quiet_hours(hour) {
             tracing::debug!(hour, "heartbeat skipped (quiet hours)");
             return Ok(());
         }
+
+        // Daily compaction check
+        let today = now.date_naive();
+        if self.last_compaction_date != Some(today) {
+            self.last_compaction_date = Some(today);
+            self.trigger_daily_compaction();
+        }
+
+        // Evaluate scheduled triggers
+        self.evaluate_scheduled_triggers(today);
 
         // Open a fresh store connection (Store is !Send, so we can't hold it across awaits)
         let store = Store::open(Path::new(&self.store_path))?;
@@ -99,12 +140,98 @@ impl Heartbeat {
             // Append heartbeat finding to daily log
             self.append_daily_log(&format!(
                 "- [{}] heartbeat: {}",
-                chrono::Local::now().format("%H:%M"),
+                now.format("%H:%M"),
                 trimmed
             ));
         }
 
         Ok(())
+    }
+
+    /// Evaluate scheduled triggers against the current date.
+    fn evaluate_scheduled_triggers(&mut self, today: chrono::NaiveDate) {
+        for trigger in &self.triggers {
+            let schedule = match trigger.schedule.as_deref() {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let should_fire = match schedule {
+                "daily" => {
+                    self.trigger_last_run.get(&trigger.action) != Some(&today)
+                }
+                "hourly" => true, // Fire every tick (tick interval controls frequency)
+                "weekly" => {
+                    let last = self.trigger_last_run.get(&trigger.action);
+                    match last {
+                        Some(d) => (today - *d).num_days() >= 7,
+                        None => true,
+                    }
+                }
+                _ => false,
+            };
+
+            if should_fire {
+                tracing::info!(
+                    action = %trigger.action,
+                    schedule,
+                    "scheduled trigger fired"
+                );
+                self.trigger_last_run.insert(trigger.action.clone(), today);
+
+                self.append_daily_log(&format!(
+                    "- [{}] scheduled:{} fired",
+                    Local::now().format("%H:%M"),
+                    trigger.action,
+                ));
+            }
+        }
+    }
+
+    /// Trigger daily compaction and session pruning.
+    fn trigger_daily_compaction(&self) {
+        tracing::info!("daily housekeeping triggered");
+
+        match Store::open(Path::new(&self.store_path)) {
+            Ok(store) => {
+                // Check conversation history size
+                match store.turn_count() {
+                    Ok(count) if count > 50 => {
+                        tracing::info!(turns = count, "conversation history eligible for compaction");
+                        self.append_daily_log(&format!(
+                            "- [{}] compaction: {} turns in history",
+                            Local::now().format("%H:%M"),
+                            count,
+                        ));
+                    }
+                    Ok(_) => {
+                        tracing::debug!("conversation history too short for compaction");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to count turns for compaction");
+                    }
+                }
+
+                // Prune sessions idle > 30 days
+                match store.prune_idle_sessions(30 * 86400) {
+                    Ok(removed) if removed > 0 => {
+                        tracing::info!(removed, "pruned idle sessions");
+                        self.append_daily_log(&format!(
+                            "- [{}] pruned {} idle sessions",
+                            Local::now().format("%H:%M"),
+                            removed,
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to prune idle sessions");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to open store for daily housekeeping");
+            }
+        }
     }
 
     /// Check whether the given hour falls within quiet hours.
@@ -120,7 +247,7 @@ impl Heartbeat {
             let _ = std::fs::create_dir_all(&workspace_dir);
         }
 
-        let today = chrono::Local::now().format("%Y-%m-%d");
+        let today = Local::now().format("%Y-%m-%d");
         let path = workspace_dir.join(format!("{}.md", today));
 
         let mut content = std::fs::read_to_string(&path).unwrap_or_default();

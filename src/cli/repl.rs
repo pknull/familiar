@@ -10,7 +10,7 @@ use crate::error::Result;
 /// Run an interactive session over any channel.
 pub async fn run_session(
     mut channel: Box<dyn Channel>,
-    conversation: &Conversation,
+    conversation: &mut Conversation,
     repl_config: &ReplConfig,
 ) -> Result<()> {
     println!("familiar v{}", env!("CARGO_PKG_VERSION"));
@@ -61,8 +61,22 @@ pub async fn run_session(
                 }
                 "/help" => {
                     let _ = channel
-                        .respond("Commands:\n  /quit     Exit familiar\n  /context  Show saved personal context\n  /cost     Show token usage and cost\n  /help     Show this help")
+                        .respond("Commands:\n  /quit     Exit familiar\n  /context  Show saved personal context\n  /cost     Show token usage and cost\n  /fork     Fork current session at last turn\n  /help     Show this help")
                         .await;
+                    continue;
+                }
+                cmd if cmd.starts_with("/fork") => {
+                    match conversation.fork_session(i64::MAX, "forked") {
+                        Ok(Some(new_id)) => {
+                            let _ = channel.respond(&format!("Session forked: {}", new_id)).await;
+                        }
+                        Ok(None) => {
+                            let _ = channel.respond("No active session to fork.").await;
+                        }
+                        Err(e) => {
+                            let _ = channel.respond(&format!("Fork failed: {}", e)).await;
+                        }
+                    }
                     continue;
                 }
                 _ => {

@@ -204,7 +204,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     // Build conversation engine
     let model_name = llm_config.model.clone();
-    let conversation = Conversation::new(
+    let mut conversation = Conversation::new(
         provider,
         &model_name,
         mcp_pool,
@@ -241,7 +241,7 @@ async fn run(cli: Cli) -> Result<()> {
             })?;
             let channel = channel::discord::DiscordChannel::new(discord_config).await?;
             tracing::info!("running as Discord bot");
-            cli::repl::run_session(Box::new(channel), &conversation, &config.repl).await?;
+            cli::repl::run_session(Box::new(channel), &mut conversation, &config.repl).await?;
         }
         Some(Commands::Sessions) => {
             // Handled early (before LLM provider), should not reach here.
@@ -309,13 +309,13 @@ async fn run(cli: Cli) -> Result<()> {
             println!("Resumed session: {} ({} turns loaded)", session_id, turns.len());
 
             let channel = channel::repl::ReplChannel::new(config.repl.clone())?;
-            cli::repl::run_session(Box::new(channel), &conversation, &config.repl).await?;
+            cli::repl::run_session(Box::new(channel), &mut conversation, &config.repl).await?;
         }
         _ => {
             if cli.simple {
                 // --simple: bare REPL, unchanged from original
                 let channel = channel::repl::ReplChannel::new(config.repl.clone())?;
-                cli::repl::run_session(Box::new(channel), &conversation, &config.repl).await?;
+                cli::repl::run_session(Box::new(channel), &mut conversation, &config.repl).await?;
             } else {
                 // Default: TUI operator console
                 let model_name = llm_config.model.clone();
@@ -479,7 +479,7 @@ async fn run(cli: Cli) -> Result<()> {
                 // Run conversation on main thread (Conversation is not Send).
                 let conv_result = cli::repl::run_session(
                     Box::new(tui_channel),
-                    &conversation,
+                    &mut conversation,
                     &config.repl,
                 )
                 .await;

@@ -3,6 +3,7 @@
 //! This is the core of Familiar. Unlike servitor's task loop (stateless, reactive),
 //! this maintains dialogue state across turns and assembles personal context.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agent::providers::{
@@ -13,6 +14,7 @@ use crate::egregore::EgregoreClient;
 use crate::error::{FamiliarError, Result};
 use crate::hooks::{HookDecision, HookRunner};
 use crate::mcp::{LlmTool, McpPool};
+use crate::profile::{self, Profile};
 use crate::store::Store;
 use crate::workspace::Workspace;
 
@@ -44,6 +46,10 @@ pub struct Conversation {
     completion_cache: Option<CompletionCache>,
     /// Whether this conversation is in a group channel (Discord guild, etc.)
     group_context: bool,
+    /// Psychographic profile for operator personalization.
+    profile: Profile,
+    /// Path to profile JSON file on disk.
+    profile_path: PathBuf,
 }
 
 impl Conversation {
@@ -57,6 +63,11 @@ impl Conversation {
         tool_trust: ToolTrustConfig,
         workspace: Workspace,
     ) -> Self {
+        let profile_path = PathBuf::from(
+            crate::config::Config::expand_path("~/.familiar/profile.json"),
+        );
+        let profile = Profile::load(&profile_path);
+
         Self {
             provider,
             model_name: model_name.into(),
@@ -69,6 +80,8 @@ impl Conversation {
             hooks: HookRunner::new(),
             completion_cache: None,
             group_context: false,
+            profile,
+            profile_path,
         }
     }
 
@@ -88,20 +101,44 @@ impl Conversation {
         self.group_context = group;
     }
 
-    /// Assemble the system prompt from workspace files.
+    /// Assemble the system prompt from workspace files and profile.
     fn system_prompt(&self) -> String {
-        let base = self.workspace.assemble_prompt(self.group_context);
+        let mut base = self.workspace.assemble_prompt(self.group_context);
+
         // If config has an override, prepend it
         if let Some(ref override_prompt) = self.config.system_prompt {
-            format!("{}\n\n---\n\n{}", override_prompt, base)
-        } else {
-            base
+            base = format!("{}\n\n---\n\n{}", override_prompt, base);
         }
+
+        // Inject profile if not in group context (privacy)
+        if !self.group_context {
+            // Tier 2 supersedes Tier 1 when available
+            if let Some(prompt) = self.profile.tier2_prompt() {
+                base = format!("{}\n\n---\n\n{}", base, prompt);
+            } else if let Some(prompt) = self.profile.tier1_prompt() {
+                base = format!("{}\n\n---\n\n{}", base, prompt);
+            }
+        }
+
+        base
     }
 
     /// List saved personal context (for /context command).
     pub fn list_context(&self) -> Result<Vec<(String, String)>> {
         self.store.list_context()
+    }
+
+    /// Fork the current session up to a given turn ID.
+    pub fn fork_session(&self, up_to_turn_id: i64, new_slug: &str) -> Result<Option<String>> {
+        // Get current session ID from store context
+        let session_id = self.store.get_context("current_session_id")?;
+        match session_id {
+            Some(sid) => {
+                let new_id = self.store.fork_session(&sid, up_to_turn_id, new_slug)?;
+                Ok(Some(new_id))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Get cost summary (for /cost command).
@@ -118,7 +155,7 @@ impl Conversation {
     /// the provider's SSE streaming endpoint. Otherwise, responses arrive
     /// in a single non-streaming call.
     pub async fn send(
-        &self,
+        &mut self,
         user_input: &str,
         on_text: Option<TextCallback>,
     ) -> Result<(String, ConversationUsage)> {
@@ -127,6 +164,18 @@ impl Conversation {
 
         // Save user turn to local history
         self.store.add_turn("user", user_input, None)?;
+
+        // Extract profile signals from user input (cheap regex, no LLM cost)
+        let signals = profile::extract::extract_signals(user_input);
+        if !signals.is_empty() {
+            for signal in &signals {
+                self.profile.set_field(signal.field, signal.value.clone(), signal.confidence, "inline");
+            }
+            self.profile.conversation_count += 1;
+            if let Err(e) = self.profile.save(&self.profile_path) {
+                tracing::debug!(error = %e, "failed to save profile");
+            }
+        }
 
         // Assemble context: recent conversation + available tools
         let messages = self.build_messages(user_input)?;
@@ -698,7 +747,7 @@ impl Conversation {
                     tracing::warn!("potential PII detected in egregore publish content");
                 }
 
-                let hash = self.egregore.publish_content(content, &tags).await?;
+                let hash = self.egregore.publish_content(content.clone(), &tags).await?;
 
                 // Log locally
                 let content_type = input
@@ -706,7 +755,25 @@ impl Conversation {
                     .and_then(|c| c.get("type"))
                     .and_then(|t| t.as_str())
                     .unwrap_or("unknown");
-                self.store.log_published(&hash, content_type, None)?;
+                let summary = match content_type {
+                    "task" => content
+                        .get("request")
+                        .or_else(|| content.get("prompt"))
+                        .and_then(|v| v.as_str()),
+                    _ => None,
+                };
+                let metadata = Some(&content);
+                self.store
+                    .log_published(&hash, content_type, summary, metadata)?;
+
+                if content_type == "task" {
+                    if let Some(task_hash) = content.get("hash").and_then(|v| v.as_str()) {
+                        if task_hash != hash {
+                            self.store
+                                .log_published(task_hash, content_type, summary, metadata)?;
+                        }
+                    }
+                }
 
                 if pii_detected {
                     return Ok(format!(
