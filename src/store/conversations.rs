@@ -1,6 +1,6 @@
 //! Conversation history — stored locally, never published to the feed.
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::error::Result;
 use crate::store::Store;
@@ -97,10 +97,15 @@ impl Store {
         hash: &str,
         content_type: &str,
         summary: Option<&str>,
+        metadata: Option<&serde_json::Value>,
     ) -> Result<()> {
+        let metadata_json = metadata
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(crate::error::FamiliarError::from)?;
         self.conn().execute(
-            "INSERT INTO published (hash, content_type, summary) VALUES (?1, ?2, ?3)",
-            params![hash, content_type, summary],
+            "INSERT INTO published (hash, content_type, summary, metadata_json) VALUES (?1, ?2, ?3, ?4)",
+            params![hash, content_type, summary, metadata_json],
         )?;
         Ok(())
     }
@@ -113,6 +118,19 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    /// Retrieve locally stored metadata for a published message hash.
+    pub fn published_metadata(&self, hash: &str) -> Result<Option<serde_json::Value>> {
+        let metadata_json: Option<String> = self.conn().query_row(
+            "SELECT metadata_json FROM published WHERE hash = ?1 ORDER BY id DESC LIMIT 1",
+            params![hash],
+            |row| row.get(0),
+        ).optional()?;
+
+        metadata_json
+            .map(|json| serde_json::from_str(&json).map_err(crate::error::FamiliarError::from))
+            .transpose()
     }
 }
 
@@ -156,7 +174,7 @@ mod tests {
     fn log_published() {
         let store = Store::in_memory().unwrap();
         store
-            .log_published("abc123", "insight", Some("Bloom filter bug"))
+            .log_published("abc123", "insight", Some("Bloom filter bug"), None)
             .unwrap();
 
         let count: i64 = store
@@ -173,10 +191,31 @@ mod tests {
         assert!(!store.has_published_hash("abc123").unwrap());
 
         store
-            .log_published("abc123", "task", Some("Test task"))
+            .log_published("abc123", "task", Some("Test task"), None)
             .unwrap();
 
         assert!(store.has_published_hash("abc123").unwrap());
         assert!(!store.has_published_hash("xyz789").unwrap());
+    }
+
+    #[test]
+    fn published_metadata_round_trips() {
+        let store = Store::in_memory().unwrap();
+        let metadata = serde_json::json!({
+            "type": "task",
+            "hash": "task-123",
+            "context": {
+                "planner_basis": {
+                    "target_id": "staging-web"
+                }
+            }
+        });
+
+        store
+            .log_published("task-123", "task", Some("Deploy"), Some(&metadata))
+            .unwrap();
+
+        let stored = store.published_metadata("task-123").unwrap().unwrap();
+        assert_eq!(stored["context"]["planner_basis"]["target_id"], "staging-web");
     }
 }

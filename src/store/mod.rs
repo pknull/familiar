@@ -180,6 +180,7 @@ impl Store {
                 hash TEXT NOT NULL,
                 content_type TEXT NOT NULL,
                 summary TEXT,
+                metadata_json TEXT,
                 published_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             );
 
@@ -247,6 +248,19 @@ impl Store {
         if !has_thread_id {
             self.conn
                 .execute_batch("ALTER TABLE conversations ADD COLUMN thread_id TEXT;")?;
+        }
+
+        let has_metadata_json: bool = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(published)")?;
+            let columns: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .filter_map(|r| r.ok())
+                .collect();
+            columns.iter().any(|c| c == "metadata_json")
+        };
+        if !has_metadata_json {
+            self.conn
+                .execute_batch("ALTER TABLE published ADD COLUMN metadata_json TEXT;")?;
         }
 
         Ok(())
