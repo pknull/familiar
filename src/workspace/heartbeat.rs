@@ -15,7 +15,7 @@
 //!
 //! # Heartbeat Checklist
 //!
-//! - Check for failed task attestations in the last hour
+//! - Check for failed task results in the last hour
 //! - Summarize new insights if any were published today
 //! ```
 

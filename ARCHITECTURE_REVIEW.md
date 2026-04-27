@@ -33,7 +33,7 @@
 
 - 21,200 lines of Rust across 62 source files. Version 1.2.4 -- the most mature project.
 - Full implementation: signed feeds, gossip replication (SHS + Box Stream), SQLite storage, schema registry, consumer groups, retention policies, bloom filter sync, credit-based flow control, MCP server, SSE events, Prometheus metrics, optional OTLP.
-- Custom crypto stack: Ed25519 signing, X25519 key exchange, ChaCha20-Poly1305, Argon2id key encryption, Private Box multi-recipient encryption.
+- Custom crypto stack: Ed25519 signing, X25519 key exchange, ChaCha20-Poly1305, owner-only private-key permissions, Private Box multi-recipient encryption.
 - 17 API route files. Comprehensive feature surface.
 
 **Risks**:

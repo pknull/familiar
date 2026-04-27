@@ -37,35 +37,18 @@ fn run(tmp: &TempDir, args: &[&str]) -> std::process::Output {
         .expect("failed to execute familiar binary")
 }
 
-/// Create a minimal config with a valid keypair so the binary can start.
 fn write_minimal_config(tmp: &TempDir) {
     let config_dir = tmp.path().join(".familiar");
-    let identity_dir = tmp.path().join(".familiar/identity");
     std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::create_dir_all(&identity_dir).unwrap();
-
-    // Generate a valid Ed25519 keypair file (32 random bytes).
-    let mut key_bytes = [0u8; 32];
-    use std::io::Read;
-    std::fs::File::open("/dev/urandom")
-        .unwrap()
-        .read_exact(&mut key_bytes)
-        .unwrap();
-    let key_path = identity_dir.join("secret.key");
-    std::fs::write(&key_path, key_bytes).unwrap();
 
     let config = format!(
         r#"
-[identity]
-secret_key = "{}"
-
 [egregore]
 api_url = "http://127.0.0.1:0"
 
 [store]
 path = "{}"
 "#,
-        key_path.to_string_lossy(),
         tmp.path().join(".familiar/test.db").to_string_lossy(),
     );
 
@@ -74,18 +57,12 @@ path = "{}"
 
 /// Create a config with a dummy LLM section (will fail to connect but parses).
 fn write_config_with_llm(tmp: &TempDir) {
-    // Ensure identity exists first.
     write_minimal_config(tmp);
 
     let config_dir = tmp.path().join(".familiar");
-    let identity_dir = tmp.path().join(".familiar/identity");
-    let key_path = identity_dir.join("secret.key");
 
     let config = format!(
         r#"
-[identity]
-secret_key = "{}"
-
 [egregore]
 api_url = "http://127.0.0.1:0"
 
@@ -97,7 +74,6 @@ provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 api_key_env = "FAKE_API_KEY"
 "#,
-        key_path.to_string_lossy(),
         tmp.path().join(".familiar/test.db").to_string_lossy(),
     );
 
@@ -109,13 +85,9 @@ fn write_mock_provider_config(tmp: &TempDir, mock_response: &str) {
     write_minimal_config(tmp);
 
     let config_dir = tmp.path().join(".familiar");
-    let key_path = tmp.path().join(".familiar/identity/secret.key");
 
     let config = format!(
         r#"
-[identity]
-secret_key = "{}"
-
 [egregore]
 api_url = "http://127.0.0.1:0"
 
@@ -127,7 +99,6 @@ provider = "mock"
 model = "mock"
 base_url = "{}"
 "#,
-        key_path.to_string_lossy(),
         tmp.path().join(".familiar/test.db").to_string_lossy(),
         mock_response,
     );

@@ -68,7 +68,9 @@ pub async fn run_session(
                 cmd if cmd.starts_with("/fork") => {
                     match conversation.fork_session(i64::MAX, "forked") {
                         Ok(Some(new_id)) => {
-                            let _ = channel.respond(&format!("Session forked: {}", new_id)).await;
+                            let _ = channel
+                                .respond(&format!("Session forked: {}", new_id))
+                                .await;
                         }
                         Ok(None) => {
                             let _ = channel.respond("No active session to fork.").await;
@@ -81,7 +83,10 @@ pub async fn run_session(
                 }
                 _ => {
                     let _ = channel
-                        .respond(&format!("Unknown command: {}. Type /help for commands.", input))
+                        .respond(&format!(
+                            "Unknown command: {}. Type /help for commands.",
+                            input
+                        ))
                         .await;
                     continue;
                 }
@@ -105,10 +110,7 @@ pub async fn run_session(
             let _ = std::io::stdout().flush();
         });
 
-        match conversation
-            .send(input, Some(stream_cb))
-            .await
-        {
+        match conversation.send(input, Some(stream_cb)).await {
             Ok(_) => {
                 // If we never got a chunk, clear thinking anyway
                 if first_chunk.load(std::sync::atomic::Ordering::SeqCst) {

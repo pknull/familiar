@@ -140,7 +140,10 @@ impl Channel for ReplChannel {
 
         // Display task summary
         println!("\n--- Network Task ---");
-        println!("  Requestor: {}", &task.requestor[..18.min(task.requestor.len())]);
+        println!(
+            "  Requestor: {}",
+            &task.requestor[..18.min(task.requestor.len())]
+        );
         println!("  Required:  {}", task.required_caps.join(", "));
         if let Some(timeout) = task.timeout_secs {
             println!("  Timeout:   {}s", timeout);

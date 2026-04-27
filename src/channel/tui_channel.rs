@@ -26,10 +26,7 @@ pub struct TuiChannel {
 pub type InputSender = mpsc::UnboundedSender<String>;
 
 impl TuiChannel {
-    pub fn new(
-        event_tx: AppEventSender,
-        state: Arc<TokioMutex<AppState>>,
-    ) -> (Self, InputSender) {
+    pub fn new(event_tx: AppEventSender, state: Arc<TokioMutex<AppState>>) -> (Self, InputSender) {
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let channel = Self {
             event_tx,

@@ -179,7 +179,11 @@ mod tests {
 
     #[tokio::test]
     async fn allow_hook_returns_allow() {
-        let hook = ShellHook::new("test-allow", "cat > /dev/null; exit 0", vec![HookEvent::PreToolUse]);
+        let hook = ShellHook::new(
+            "test-allow",
+            "cat > /dev/null; exit 0",
+            vec![HookEvent::PreToolUse],
+        );
         let payload = HookPayload {
             event: HookEvent::PreToolUse,
             tool_name: "test".into(),
@@ -240,7 +244,11 @@ mod tests {
 
     #[tokio::test]
     async fn error_hook_allows_with_warning() {
-        let hook = ShellHook::new("test-error", "cat > /dev/null; exit 1", vec![HookEvent::PreToolUse]);
+        let hook = ShellHook::new(
+            "test-error",
+            "cat > /dev/null; exit 1",
+            vec![HookEvent::PreToolUse],
+        );
         let payload = HookPayload {
             event: HookEvent::PreToolUse,
             tool_name: "test".into(),

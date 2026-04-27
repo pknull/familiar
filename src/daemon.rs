@@ -207,11 +207,13 @@ impl Daemon {
         let sse_triggers = match std::fs::read_to_string(&heartbeat_path) {
             Ok(content) => {
                 let config = heartbeat_config::parse(&content);
-                let triggers: Vec<Trigger> = config.triggers.into_iter()
-                    .filter(|t| t.is_sse())
-                    .collect();
+                let triggers: Vec<Trigger> =
+                    config.triggers.into_iter().filter(|t| t.is_sse()).collect();
                 if !triggers.is_empty() {
-                    tracing::info!(count = triggers.len(), "loaded SSE triggers from HEARTBEAT.md");
+                    tracing::info!(
+                        count = triggers.len(),
+                        "loaded SSE triggers from HEARTBEAT.md"
+                    );
                 }
                 triggers
             }
@@ -349,11 +351,7 @@ impl Daemon {
             .and_then(|a| a.as_str())
             .unwrap_or("unknown");
 
-        tracing::info!(
-            msg_type,
-            author,
-            "processing relevant feed message"
-        );
+        tracing::info!(msg_type, author, "processing relevant feed message");
 
         match msg_type {
             "query" => self.handle_query(&message).await,
@@ -450,11 +448,7 @@ impl Daemon {
         if !self.agent_config.trusted_servitors.is_empty()
             && !self.agent_config.trusted_servitors.contains(&servitor)
         {
-            tracing::debug!(
-                servitor,
-                task_id,
-                "ignoring offer from untrusted servitor"
-            );
+            tracing::debug!(servitor, task_id, "ignoring offer from untrusted servitor");
             return Ok(());
         }
 
@@ -489,8 +483,7 @@ impl Daemon {
                     assign_hash = hash,
                     "auto-assigned task (first offer wins)"
                 );
-                self.tracker
-                    .mark_assigned(task_id, servitor);
+                self.tracker.mark_assigned(task_id, servitor);
             }
             Err(e) => {
                 tracing::warn!(
@@ -634,10 +627,7 @@ impl Daemon {
 
     /// Check whether a feed message is relevant to this daemon.
     fn is_relevant(&self, message: &serde_json::Value) -> bool {
-        let author = message
-            .get("author")
-            .and_then(|a| a.as_str())
-            .unwrap_or("");
+        let author = message.get("author").and_then(|a| a.as_str()).unwrap_or("");
 
         // Never process our own messages.
         if author == self.identity_id {
@@ -649,18 +639,22 @@ impl Daemon {
             None => return false,
         };
 
-        let msg_type = content
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
+        let msg_type = content.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
         // Apply configured scope filters.
         let tags: Vec<String> = message
             .get("tags")
             .and_then(|t| t.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        if !self.scope.matches_scope(Some(author), Some(msg_type), &tags) {
+        if !self
+            .scope
+            .matches_scope(Some(author), Some(msg_type), &tags)
+        {
             return false;
         }
 
@@ -673,20 +667,20 @@ impl Daemon {
                 self.agent_config.verify_servitor_profile
                     || !self.agent_config.trusted_servitors.is_empty()
             }
-            "servitor_manifest" | "environment_snapshot" => self.agent_config.verify_servitor_profile,
+            "servitor_manifest" | "environment_snapshot" => {
+                self.agent_config.verify_servitor_profile
+            }
 
             // Task results — check if we published the originating task.
             "task_result" | "task_failed" => self.is_our_task_result(message),
 
             // Task lifecycle messages — relevant if they match a task we're tracking.
             // These bypass normal scope filters since they're protocol messages.
-            "task_offer" | "task_started" | "task_offer_withdraw" => {
-                content
-                    .get("task_id")
-                    .and_then(|t| t.as_str())
-                    .map(|task_id| self.is_our_task_id(task_id))
-                    .unwrap_or(false)
-            }
+            "task_offer" | "task_started" | "task_offer_withdraw" => content
+                .get("task_id")
+                .and_then(|t| t.as_str())
+                .map(|task_id| self.is_our_task_id(task_id))
+                .unwrap_or(false),
 
             _ => false,
         }
@@ -746,15 +740,12 @@ impl Daemon {
     }
 
     fn result_task_id<'a>(&self, message: &'a serde_json::Value) -> Option<&'a str> {
-        message
-            .get("relates")
-            .and_then(|r| r.as_str())
-            .or_else(|| {
-                message
-                    .get("content")
-                    .and_then(|c| c.get("task_id"))
-                    .and_then(|t| t.as_str())
-            })
+        message.get("relates").and_then(|r| r.as_str()).or_else(|| {
+            message
+                .get("content")
+                .and_then(|c| c.get("task_id"))
+                .and_then(|t| t.as_str())
+        })
     }
 
     fn planner_basis_for_task(&self, task_id: &str) -> Result<Option<serde_json::Value>> {
@@ -801,14 +792,25 @@ impl Daemon {
             }
 
             if let Some(target_id) = target_id.as_deref() {
-                if !self.manifest_contains_target(servitor, manifest_ref, target_id).await? {
+                if !self
+                    .manifest_contains_target(servitor, manifest_ref, target_id)
+                    .await?
+                {
                     return Ok(false);
                 }
             }
         }
 
         if let Some(snapshot_ref) = snapshot_ref.as_deref() {
-            if !self.snapshot_matches(servitor, snapshot_ref, manifest_ref.as_deref(), target_id.as_deref()).await? {
+            if !self
+                .snapshot_matches(
+                    servitor,
+                    snapshot_ref,
+                    manifest_ref.as_deref(),
+                    target_id.as_deref(),
+                )
+                .await?
+            {
                 return Ok(false);
             }
         }
@@ -884,8 +886,12 @@ impl Daemon {
     ) -> Result<bool> {
         if let Some(snapshot) = self.environment_snapshots.get(snapshot_ref) {
             return Ok(snapshot.servitor_id == servitor
-                && manifest_ref.map(|value| snapshot.manifest_ref == value).unwrap_or(true)
-                && target_id.map(|value| snapshot.target_id == value).unwrap_or(true));
+                && manifest_ref
+                    .map(|value| snapshot.manifest_ref == value)
+                    .unwrap_or(true)
+                && target_id
+                    .map(|value| snapshot.target_id == value)
+                    .unwrap_or(true));
         }
 
         let messages = self
@@ -901,8 +907,12 @@ impl Daemon {
             .get(snapshot_ref)
             .map(|snapshot| {
                 snapshot.servitor_id == servitor
-                    && manifest_ref.map(|value| snapshot.manifest_ref == value).unwrap_or(true)
-                    && target_id.map(|value| snapshot.target_id == value).unwrap_or(true)
+                    && manifest_ref
+                        .map(|value| snapshot.manifest_ref == value)
+                        .unwrap_or(true)
+                    && target_id
+                        .map(|value| snapshot.target_id == value)
+                        .unwrap_or(true)
             })
             .unwrap_or(false))
     }
@@ -915,20 +925,14 @@ impl Daemon {
                 reason: "query message missing content".into(),
             })?;
 
-        let body = content
-            .get("body")
-            .and_then(|b| b.as_str())
-            .unwrap_or("");
+        let body = content.get("body").and_then(|b| b.as_str()).unwrap_or("");
 
         let author = message
             .get("author")
             .and_then(|a| a.as_str())
             .unwrap_or("unknown");
 
-        let hash = message
-            .get("hash")
-            .and_then(|h| h.as_str())
-            .unwrap_or("");
+        let hash = message.get("hash").and_then(|h| h.as_str()).unwrap_or("");
 
         // Build a prompt that gives the LLM context about the incoming query.
         let prompt = format!(
@@ -968,10 +972,7 @@ impl Daemon {
         let author = message.get("author").and_then(|a| a.as_str()).unwrap_or("");
 
         // Build event fields from message for trigger matching
-        let mut fields: Vec<(&str, &str)> = vec![
-            ("content_type", msg_type),
-            ("author", author),
-        ];
+        let mut fields: Vec<(&str, &str)> = vec![("content_type", msg_type), ("author", author)];
 
         // Add status if present (common in task_result/task_failed)
         let status_str;
@@ -990,7 +991,8 @@ impl Daemon {
                 );
 
                 // Append to daily log
-                let workspace_dir = crate::config::Config::expand_path("~/.familiar/workspace/daily");
+                let workspace_dir =
+                    crate::config::Config::expand_path("~/.familiar/workspace/daily");
                 let daily_dir = std::path::Path::new(&workspace_dir);
                 if !daily_dir.exists() {
                     let _ = std::fs::create_dir_all(daily_dir);
@@ -1029,12 +1031,7 @@ impl Daemon {
             .and_then(|s| s.as_str())
             .unwrap_or("(no summary)");
 
-        tracing::info!(
-            author,
-            relates,
-            summary,
-            "task result received"
-        );
+        tracing::info!(author, relates, summary, "task result received");
 
         // Print to stdout for terminal visibility.
         println!(

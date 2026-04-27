@@ -5,7 +5,7 @@ Personal companion for the Thallus decentralized AI infrastructure.
 ## Architecture
 
 Familiar is the mind of Thallus — an always-on conversational companion that translates
-natural language into egregore network actions. It publishes under your identity.
+natural language into egregore network actions. It publishes through the local egregore node.
 
 ## Module Map
 
@@ -35,7 +35,6 @@ cargo test
 
 Config at `~/.familiar/familiar.toml`. Key sections:
 
-- `[identity]` — path to egregore secret key
 - `[egregore]` — daemon API URL
 - `[llm]` — provider (claude-code, anthropic, openai)
 - `[mcp.*]` — local MCP servers

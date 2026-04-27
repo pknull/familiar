@@ -121,16 +121,36 @@ impl Profile {
     /// Get all populated fields.
     fn all_fields(&self) -> Vec<&ProfileField> {
         let mut fields = Vec::new();
-        if let Some(ref f) = self.profession { fields.push(f); }
-        if let Some(ref f) = self.communication_style { fields.push(f); }
-        if let Some(ref f) = self.goals { fields.push(f); }
-        if let Some(ref f) = self.frustrations { fields.push(f); }
-        if let Some(ref f) = self.time_patterns { fields.push(f); }
-        if let Some(ref f) = self.expertise_areas { fields.push(f); }
-        if let Some(ref f) = self.preferences { fields.push(f); }
-        if let Some(ref f) = self.working_style { fields.push(f); }
-        if let Some(ref f) = self.philosophy { fields.push(f); }
-        if let Some(ref f) = self.creative_preferences { fields.push(f); }
+        if let Some(ref f) = self.profession {
+            fields.push(f);
+        }
+        if let Some(ref f) = self.communication_style {
+            fields.push(f);
+        }
+        if let Some(ref f) = self.goals {
+            fields.push(f);
+        }
+        if let Some(ref f) = self.frustrations {
+            fields.push(f);
+        }
+        if let Some(ref f) = self.time_patterns {
+            fields.push(f);
+        }
+        if let Some(ref f) = self.expertise_areas {
+            fields.push(f);
+        }
+        if let Some(ref f) = self.preferences {
+            fields.push(f);
+        }
+        if let Some(ref f) = self.working_style {
+            fields.push(f);
+        }
+        if let Some(ref f) = self.philosophy {
+            fields.push(f);
+        }
+        if let Some(ref f) = self.creative_preferences {
+            fields.push(f);
+        }
         fields
     }
 
@@ -156,7 +176,10 @@ impl Profile {
             return None;
         }
 
-        Some(format!("## Operator Profile (Tier 1)\n\n{}", parts.join("\n")))
+        Some(format!(
+            "## Operator Profile (Tier 1)\n\n{}",
+            parts.join("\n")
+        ))
     }
 
     /// Generate Tier 2 prompt injection (full personalization).
@@ -221,7 +244,12 @@ mod tests {
     #[test]
     fn tier1_at_03() {
         let mut p = Profile::default();
-        p.set_field("communication_style", "Direct, concise".into(), 0.5, "inline");
+        p.set_field(
+            "communication_style",
+            "Direct, concise".into(),
+            0.5,
+            "inline",
+        );
         p.set_field("working_style", "Action-oriented".into(), 0.4, "inline");
         // confidence = (0.5 + 0.4) / 2 = 0.45 > 0.3
         assert!(p.tier1_prompt().is_some());
@@ -231,7 +259,13 @@ mod tests {
     #[test]
     fn tier2_at_06_and_fresh() {
         let mut p = Profile::default();
-        for field in &["profession", "communication_style", "goals", "working_style", "expertise_areas"] {
+        for field in &[
+            "profession",
+            "communication_style",
+            "goals",
+            "working_style",
+            "expertise_areas",
+        ] {
             p.set_field(field, "test value".into(), 0.7, "llm");
         }
         // confidence = 0.7 (all fields same), updated_at = now

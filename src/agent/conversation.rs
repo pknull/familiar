@@ -63,9 +63,9 @@ impl Conversation {
         tool_trust: ToolTrustConfig,
         workspace: Workspace,
     ) -> Self {
-        let profile_path = PathBuf::from(
-            crate::config::Config::expand_path("~/.familiar/profile.json"),
-        );
+        let profile_path = PathBuf::from(crate::config::Config::expand_path(
+            "~/.familiar/profile.json",
+        ));
         let profile = Profile::load(&profile_path);
 
         Self {
@@ -169,7 +169,12 @@ impl Conversation {
         let signals = profile::extract::extract_signals(user_input);
         if !signals.is_empty() {
             for signal in &signals {
-                self.profile.set_field(signal.field, signal.value.clone(), signal.confidence, "inline");
+                self.profile.set_field(
+                    signal.field,
+                    signal.value.clone(),
+                    signal.confidence,
+                    "inline",
+                );
             }
             self.profile.conversation_count += 1;
             if let Err(e) = self.profile.save(&self.profile_path) {
@@ -223,7 +228,7 @@ impl Conversation {
         // Add egregore tools
         tools.push(LlmTool {
             name: "egregore_publish".to_string(),
-            description: Some("Publish content to the egregore network feed. Use for insights, tasks, queries, and responses that need to reach the network. Content is signed under your person's identity.".to_string()),
+            description: Some("Publish content to the egregore network feed through the local node. Use for insights, tasks, queries, and responses that need to reach the network. Public feed authorship comes from the local egregore node identity.".to_string()),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -292,7 +297,10 @@ impl Conversation {
 
         tools.push(LlmTool {
             name: "local_recall".to_string(),
-            description: Some("Recall a previously saved personal preference or context from local storage.".to_string()),
+            description: Some(
+                "Recall a previously saved personal preference or context from local storage."
+                    .to_string(),
+            ),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -376,9 +384,10 @@ impl Conversation {
             let system = self.system_prompt();
 
             // Check completion cache before calling provider
-            let cached = self.completion_cache.as_ref().and_then(|cache| {
-                cache.lookup(&self.model_name, &system, &messages, active_tools)
-            });
+            let cached = self
+                .completion_cache
+                .as_ref()
+                .and_then(|cache| cache.lookup(&self.model_name, &system, &messages, active_tools));
 
             let response = if let Some(hit) = cached {
                 tracing::debug!("completion cache hit, skipping API call");
@@ -397,7 +406,8 @@ impl Conversation {
                         cb(text);
                     }
                 };
-                let resp = self.provider
+                let resp = self
+                    .provider
                     .chat_stream(&system, &messages, active_tools, &stream_cb)
                     .await?;
 
@@ -406,9 +416,7 @@ impl Conversation {
                 }
                 resp
             } else {
-                let resp = self.provider
-                    .chat(&system, &messages, active_tools)
-                    .await?;
+                let resp = self.provider.chat(&system, &messages, active_tools).await?;
 
                 if let Some(cache) = &self.completion_cache {
                     cache.store(&self.model_name, &system, &messages, active_tools, &resp);
@@ -467,7 +475,10 @@ impl Conversation {
                         "You described wanting to use a tool but didn't call it. \
                          Please actually invoke the tool rather than describing what you would do.",
                     ));
-                    tracing::debug!(nudge = nudge_count, "tool intent detected without call, nudging");
+                    tracing::debug!(
+                        nudge = nudge_count,
+                        "tool intent detected without call, nudging"
+                    );
                     continue;
                 }
                 break;
@@ -494,12 +505,7 @@ impl Conversation {
                     Err(e) => (format!("Error: {}", e), true),
                 };
 
-                tracing::debug!(
-                    tool = name,
-                    turn = turn,
-                    is_error = is_error,
-                    "tool call"
-                );
+                tracing::debug!(tool = name, turn = turn, is_error = is_error, "tool call");
 
                 tool_results.push(ContentBlock::tool_result(*id, &content, is_error));
             }
@@ -672,11 +678,7 @@ impl Conversation {
     }
 
     /// Execute a single tool call with pre/post hooks.
-    async fn execute_tool(
-        &self,
-        name: &str,
-        input: &serde_json::Value,
-    ) -> Result<String> {
+    async fn execute_tool(&self, name: &str, input: &serde_json::Value) -> Result<String> {
         if self.is_tool_blocked(name) {
             return Err(FamiliarError::Internal {
                 reason: format!("Tool '{}' is blocked by scope policy", name),
@@ -721,11 +723,7 @@ impl Conversation {
     }
 
     /// Inner tool execution logic (called after hooks).
-    async fn execute_tool_inner(
-        &self,
-        name: &str,
-        input: &serde_json::Value,
-    ) -> Result<String> {
+    async fn execute_tool_inner(&self, name: &str, input: &serde_json::Value) -> Result<String> {
         match name {
             "egregore_publish" => {
                 let content = input
@@ -735,11 +733,7 @@ impl Conversation {
                 let tags: Vec<&str> = input
                     .get("tags")
                     .and_then(|t| t.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str())
-                            .collect()
-                    })
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
                     .unwrap_or_default();
 
                 let pii_detected = contains_potential_pii(&content);
@@ -747,7 +741,10 @@ impl Conversation {
                     tracing::warn!("potential PII detected in egregore publish content");
                 }
 
-                let hash = self.egregore.publish_content(content.clone(), &tags).await?;
+                let hash = self
+                    .egregore
+                    .publish_content(content.clone(), &tags)
+                    .await?;
 
                 // Log locally
                 let content_type = input
@@ -791,10 +788,7 @@ impl Conversation {
                 let content_type = input.get("content_type").and_then(|v| v.as_str());
                 let tag = input.get("tag").and_then(|v| v.as_str());
                 let search = input.get("search").and_then(|v| v.as_str());
-                let limit = input
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(20) as usize;
+                let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
 
                 let messages = self
                     .egregore
@@ -805,30 +799,27 @@ impl Conversation {
             }
 
             "local_remember" => {
-                let key = input
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| FamiliarError::Internal {
+                let key = input.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+                    FamiliarError::Internal {
                         reason: "local_remember requires 'key'".into(),
-                    })?;
-                let value = input
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| FamiliarError::Internal {
+                    }
+                })?;
+                let value = input.get("value").and_then(|v| v.as_str()).ok_or_else(|| {
+                    FamiliarError::Internal {
                         reason: "local_remember requires 'value'".into(),
-                    })?;
+                    }
+                })?;
 
                 self.store.set_context(key, value)?;
                 Ok(format!("Remembered: {} = {}", key, value))
             }
 
             "local_recall" => {
-                let key = input
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| FamiliarError::Internal {
+                let key = input.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+                    FamiliarError::Internal {
                         reason: "local_recall requires 'key'".into(),
-                    })?;
+                    }
+                })?;
 
                 match self.store.get_context(key)? {
                     Some(value) => Ok(value),
@@ -837,12 +828,11 @@ impl Conversation {
             }
 
             "workspace_read" => {
-                let file = input
-                    .get("file")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| FamiliarError::Internal {
+                let file = input.get("file").and_then(|v| v.as_str()).ok_or_else(|| {
+                    FamiliarError::Internal {
                         reason: "workspace_read requires 'file'".into(),
-                    })?;
+                    }
+                })?;
 
                 match self.workspace.read_file(file) {
                     Some(content) => Ok(content),
@@ -851,12 +841,11 @@ impl Conversation {
             }
 
             "workspace_write" => {
-                let file = input
-                    .get("file")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| FamiliarError::Internal {
+                let file = input.get("file").and_then(|v| v.as_str()).ok_or_else(|| {
+                    FamiliarError::Internal {
                         reason: "workspace_write requires 'file'".into(),
-                    })?;
+                    }
+                })?;
                 let content = input
                     .get("content")
                     .and_then(|v| v.as_str())
@@ -907,7 +896,12 @@ impl Conversation {
 /// - Sensitive JSON key names
 fn contains_potential_pii(value: &serde_json::Value) -> bool {
     const PII_KEYS: &[&str] = &[
-        "email", "phone", "ssn", "password", "address", "credit_card",
+        "email",
+        "phone",
+        "ssn",
+        "password",
+        "address",
+        "credit_card",
     ];
 
     match value {

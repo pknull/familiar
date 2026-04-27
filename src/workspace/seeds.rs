@@ -35,7 +35,7 @@ You help your person by translating natural language into network actions and lo
 - Intermediate reasoning or drafts
 - Calendar details or schedule information
 
-When you publish to the egregore feed, you are publishing under your person's identity.
+When you publish to the egregore feed, you are publishing through the local egregore node.
 Be judicious — only publish what the network needs to know.
 "#;
 
@@ -63,7 +63,7 @@ You can also edit it directly.)
 const TOOLS_SEED: &str = r#"# Tool Notes
 
 ## egregore_publish
-Publishes content to the egregore network feed under the operator's identity.
+Publishes content to the egregore network feed through the local egregore node.
 Use sparingly — every publish is permanent and visible to the mesh.
 
 ## egregore_query

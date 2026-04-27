@@ -138,13 +138,13 @@ impl EgregoreClient {
             url.push_str(&format!("&search={}", urlencoding::encode(s)));
         }
 
-        let response = self
-            .auth(self.http.get(&url))
-            .send()
-            .await
-            .map_err(|e| FamiliarError::Egregore {
-                reason: format!("query request failed: {}", e),
-            })?;
+        let response =
+            self.auth(self.http.get(&url))
+                .send()
+                .await
+                .map_err(|e| FamiliarError::Egregore {
+                    reason: format!("query request failed: {}", e),
+                })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -165,13 +165,13 @@ impl EgregoreClient {
     /// Query mesh peer health status.
     pub async fn get_mesh(&self) -> Result<Vec<serde_json::Value>> {
         let url = format!("{}/v1/mesh", self.api_url);
-        let response = self
-            .auth(self.http.get(&url))
-            .send()
-            .await
-            .map_err(|e| FamiliarError::Egregore {
-                reason: format!("mesh request failed: {}", e),
-            })?;
+        let response =
+            self.auth(self.http.get(&url))
+                .send()
+                .await
+                .map_err(|e| FamiliarError::Egregore {
+                    reason: format!("mesh request failed: {}", e),
+                })?;
 
         if !response.status().is_success() {
             return Ok(Vec::new());
@@ -192,6 +192,38 @@ impl EgregoreClient {
             Ok(response) => Ok(response.status().is_success()),
             Err(_) => Ok(false),
         }
+    }
+
+    /// Query the node's canonical public identity.
+    pub async fn get_public_id(&self) -> Result<String> {
+        let url = format!("{}/v1/identity", self.api_url);
+        let response =
+            self.auth(self.http.get(&url))
+                .send()
+                .await
+                .map_err(|e| FamiliarError::Egregore {
+                    reason: format!("identity request failed: {}", e),
+                })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(FamiliarError::Egregore {
+                reason: format!("identity request failed with {}: {}", status, body),
+            });
+        }
+
+        let envelope: ApiResponse<IdentityInfo> =
+            response.json().await.map_err(|e| FamiliarError::Egregore {
+                reason: format!("failed to parse identity response: {}", e),
+            })?;
+
+        envelope
+            .data
+            .map(|info| info.public_id)
+            .ok_or_else(|| FamiliarError::Egregore {
+                reason: "identity response missing data field".into(),
+            })
     }
 }
 
@@ -227,6 +259,11 @@ struct PublishedMessage {
     hash: String,
     #[allow(dead_code)]
     sequence: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct IdentityInfo {
+    public_id: String,
 }
 
 #[cfg(test)]

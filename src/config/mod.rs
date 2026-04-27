@@ -13,9 +13,6 @@ pub use thallus_core::config::{LlmConfig, McpServerConfig};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
-    pub identity: IdentityConfig,
-
-    #[serde(default)]
     pub egregore: EgregoreConfig,
 
     #[serde(default)]
@@ -50,25 +47,6 @@ pub struct Config {
 
     #[serde(default)]
     pub operator: OperatorConfig,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IdentityConfig {
-    /// Path to the secret key file (reuses your egregore identity).
-    #[serde(default = "default_secret_key")]
-    pub secret_key: String,
-}
-
-impl Default for IdentityConfig {
-    fn default() -> Self {
-        Self {
-            secret_key: default_secret_key(),
-        }
-    }
-}
-
-fn default_secret_key() -> String {
-    "~/.familiar/secret.key".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

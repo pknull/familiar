@@ -14,9 +14,9 @@ use std::time::Duration;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
+use ratatui_textarea::TextArea;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;
-use ratatui_textarea::TextArea;
 
 use crate::channel::tui_channel::InputSender;
 use crate::config::TuiConfig;

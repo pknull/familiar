@@ -202,7 +202,9 @@ mod tests {
 
     #[test]
     fn compress_respects_max_chars() {
-        let long_lines: Vec<String> = (0..100).map(|i| format!("line {} {}", i, "x".repeat(100))).collect();
+        let long_lines: Vec<String> = (0..100)
+            .map(|i| format!("line {} {}", i, "x".repeat(100)))
+            .collect();
         let input = long_lines.join("\n");
         let result = compress_summary(&input);
         // Allow for the "[summary truncated]" suffix

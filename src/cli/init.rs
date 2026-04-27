@@ -7,10 +7,6 @@ use crate::error::{FamiliarError, Result};
 const EXAMPLE_CONFIG: &str = r#"# Familiar configuration
 # See: https://github.com/pknull/familiar
 
-[identity]
-# Path to your egregore secret key (reuses your existing identity)
-secret_key = "~/egregore-data/secret.key"
-
 [egregore]
 api_url = "http://127.0.0.1:7654"
 

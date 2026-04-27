@@ -7,7 +7,6 @@ mod egregore;
 mod error;
 mod heartbeat;
 mod hooks;
-mod identity;
 mod mcp;
 mod profile;
 mod store;
@@ -23,7 +22,6 @@ use crate::agent::providers::create_provider;
 use crate::config::Config;
 use crate::egregore::EgregoreClient;
 use crate::error::{FamiliarError, Result};
-use crate::identity::Identity;
 use crate::mcp::McpPool;
 use crate::store::Store;
 
@@ -112,16 +110,13 @@ async fn run(cli: Cli) -> Result<()> {
     }
     let config = Config::load(&config_path)?;
 
-    // Load identity
-    let key_path = PathBuf::from(Config::expand_path(&config.identity.secret_key));
-    let identity = Identity::load(&key_path)?;
-    tracing::info!(id = %identity.public_id(), "loaded identity");
-
     // Connect to egregore
     let egregore = EgregoreClient::new(&config.egregore.api_url, config.egregore.api_token.clone());
     match egregore.health_check().await {
         Ok(true) => tracing::info!(url = %config.egregore.api_url, "egregore connected"),
-        _ => tracing::warn!(url = %config.egregore.api_url, "egregore not reachable (continuing anyway)"),
+        _ => {
+            tracing::warn!(url = %config.egregore.api_url, "egregore not reachable (continuing anyway)")
+        }
     }
 
     // Initialize MCP pool
@@ -223,11 +218,12 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Some(Commands::Daemon) => {
             let store_path = Config::expand_path(&config.store.path);
+            let identity_id = egregore_for_panes.get_public_id().await?;
             let daemon = daemon::Daemon::new(
                 conversation,
                 egregore_for_panes.clone(),
                 config.egregore.api_url.clone(),
-                identity.public_id().to_string(),
+                identity_id,
                 store_path,
                 config.daemon.clone(),
                 config.agent.clone(),
@@ -236,9 +232,14 @@ async fn run(cli: Cli) -> Result<()> {
             daemon.run().await?;
         }
         Some(Commands::Discord) => {
-            let discord_config = config.discord.as_ref().ok_or_else(|| FamiliarError::Config {
-                reason: "Discord requires [discord] section in config. Add token_env at minimum.".into(),
-            })?;
+            let discord_config = config
+                .discord
+                .as_ref()
+                .ok_or_else(|| FamiliarError::Config {
+                    reason:
+                        "Discord requires [discord] section in config. Add token_env at minimum."
+                            .into(),
+                })?;
             let channel = channel::discord::DiscordChannel::new(discord_config).await?;
             tracing::info!("running as Discord bot");
             cli::repl::run_session(Box::new(channel), &mut conversation, &config.repl).await?;
@@ -255,7 +256,8 @@ async fn run(cli: Cli) -> Result<()> {
             let session_id = match session {
                 Some(ref arg) => {
                     // Match by ID or slug
-                    sessions.iter()
+                    sessions
+                        .iter()
                         .find(|s| s.id == *arg || s.slug == *arg)
                         .map(|s| s.id.clone())
                         .ok_or_else(|| FamiliarError::Internal {
@@ -279,8 +281,10 @@ async fn run(cli: Cli) -> Result<()> {
                     std::io::stdout().flush().unwrap();
 
                     let mut input = String::new();
-                    std::io::stdin().read_line(&mut input).map_err(|e| FamiliarError::Internal {
-                        reason: format!("Failed to read input: {}", e),
+                    std::io::stdin().read_line(&mut input).map_err(|e| {
+                        FamiliarError::Internal {
+                            reason: format!("Failed to read input: {}", e),
+                        }
                     })?;
 
                     let idx: usize = input.trim().parse().map_err(|_| FamiliarError::Internal {
@@ -306,7 +310,11 @@ async fn run(cli: Cli) -> Result<()> {
                 active_store.add_turn(role, content, tool_calls.as_deref())?;
             }
             resume_store.touch_session(&session_id)?;
-            println!("Resumed session: {} ({} turns loaded)", session_id, turns.len());
+            println!(
+                "Resumed session: {} ({} turns loaded)",
+                session_id,
+                turns.len()
+            );
 
             let channel = channel::repl::ReplChannel::new(config.repl.clone())?;
             cli::repl::run_session(Box::new(channel), &mut conversation, &config.repl).await?;
@@ -321,9 +329,12 @@ async fn run(cli: Cli) -> Result<()> {
                 let model_name = llm_config.model.clone();
                 let session_name = format!("session-{}", chrono::Local::now().format("%H%M"));
 
-                let state = std::sync::Arc::new(tokio::sync::Mutex::new(
-                    tui::AppState::new(model_name, session_name, config.tui.panes.len(), config.tui.status_template.clone()),
-                ));
+                let state = std::sync::Arc::new(tokio::sync::Mutex::new(tui::AppState::new(
+                    model_name,
+                    session_name,
+                    config.tui.panes.len(),
+                    config.tui.status_template.clone(),
+                )));
                 let (event_tx, event_rx) = tui::event_channel();
                 let (tui_channel, input_tx) = channel::tui_channel::TuiChannel::new(
                     event_tx.clone(),
@@ -341,26 +352,36 @@ async fn run(cli: Cli) -> Result<()> {
                     let poll_secs = pane.poll_interval_secs.unwrap_or(10);
 
                     tokio::spawn(async move {
-                        use crate::tui::widgets::sidebar::{FeedItem, PaneData, PeerItem, TaskItem};
-                        let mut interval = tokio::time::interval(
-                            std::time::Duration::from_secs(poll_secs),
-                        );
+                        use crate::tui::widgets::sidebar::{
+                            FeedItem, PaneData, PeerItem, TaskItem,
+                        };
+                        let mut interval =
+                            tokio::time::interval(std::time::Duration::from_secs(poll_secs));
                         loop {
                             interval.tick().await;
                             let data = match pane_source.as_str() {
                                 "egregore_feed" => {
                                     let ct = pane_filter.as_deref();
-                                    match pane_egregore.query_messages(None, ct, None, None, 20).await {
+                                    match pane_egregore
+                                        .query_messages(None, ct, None, None, 20)
+                                        .await
+                                    {
                                         Ok(msgs) => PaneData::Feed(
                                             msgs.iter()
                                                 .map(|m| FeedItem {
-                                                    content_type: m.get("content")
+                                                    content_type: m
+                                                        .get("content")
                                                         .and_then(|c| c.get("type"))
                                                         .and_then(|t| t.as_str())
                                                         .unwrap_or("?")
                                                         .to_string(),
-                                                    summary: m.get("content")
-                                                        .and_then(|c| c.get("title").or(c.get("observation")).or(c.get("question")))
+                                                    summary: m
+                                                        .get("content")
+                                                        .and_then(|c| {
+                                                            c.get("title")
+                                                                .or(c.get("observation"))
+                                                                .or(c.get("question"))
+                                                        })
                                                         .and_then(|v| v.as_str())
                                                         .unwrap_or("")
                                                         .chars()
@@ -374,12 +395,15 @@ async fn run(cli: Cli) -> Result<()> {
                                 }
                                 "tasks" => {
                                     // Query task lifecycle messages (all task-related content types).
-                                    let tag_query = pane_egregore.query_messages(None, None, Some("task"), None, 30).await;
+                                    let tag_query = pane_egregore
+                                        .query_messages(None, None, Some("task"), None, 30)
+                                        .await;
                                     match tag_query {
                                         Ok(msgs) => PaneData::Tasks(
                                             msgs.iter()
                                                 .map(|m| {
-                                                    let content_type = m.get("content")
+                                                    let content_type = m
+                                                        .get("content")
                                                         .and_then(|c| c.get("type"))
                                                         .and_then(|t| t.as_str())
                                                         .unwrap_or("unknown");
@@ -387,20 +411,22 @@ async fn run(cli: Cli) -> Result<()> {
                                                         "task" => "pending",
                                                         "task_offer" => "offered",
                                                         "task_assign" => "active",
-                                                        "task_result" => {
-                                                            m.get("content")
-                                                                .and_then(|c| c.get("status"))
-                                                                .and_then(|s| s.as_str())
-                                                                .unwrap_or("completed")
-                                                        }
+                                                        "task_result" => m
+                                                            .get("content")
+                                                            .and_then(|c| c.get("status"))
+                                                            .and_then(|s| s.as_str())
+                                                            .unwrap_or("completed"),
                                                         _ => "unknown",
                                                     };
                                                     TaskItem {
                                                         status: status.to_string(),
-                                                        summary: m.get("content")
-                                                            .and_then(|c| c.get("task_id")
-                                                                .or(c.get("prompt"))
-                                                                .or(c.get("summary")))
+                                                        summary: m
+                                                            .get("content")
+                                                            .and_then(|c| {
+                                                                c.get("task_id")
+                                                                    .or(c.get("prompt"))
+                                                                    .or(c.get("summary"))
+                                                            })
                                                             .and_then(|v| v.as_str())
                                                             .unwrap_or("")
                                                             .chars()
@@ -413,27 +439,28 @@ async fn run(cli: Cli) -> Result<()> {
                                         Err(_) => PaneData::Empty,
                                     }
                                 }
-                                "peers" => {
-                                    match pane_egregore.get_mesh().await {
-                                        Ok(peers) => PaneData::Peers(
-                                            peers.iter()
-                                                .map(|p| PeerItem {
-                                                    name: p.get("peer_id")
-                                                        .and_then(|v| v.as_str())
-                                                        .unwrap_or("?")
-                                                        .chars()
-                                                        .take(20)
-                                                        .collect(),
-                                                    health: p.get("status")
-                                                        .and_then(|v| v.as_str())
-                                                        .unwrap_or("unknown")
-                                                        .to_string(),
-                                                })
-                                                .collect(),
-                                        ),
-                                        Err(_) => PaneData::Empty,
-                                    }
-                                }
+                                "peers" => match pane_egregore.get_mesh().await {
+                                    Ok(peers) => PaneData::Peers(
+                                        peers
+                                            .iter()
+                                            .map(|p| PeerItem {
+                                                name: p
+                                                    .get("peer_id")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("?")
+                                                    .chars()
+                                                    .take(20)
+                                                    .collect(),
+                                                health: p
+                                                    .get("status")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("unknown")
+                                                    .to_string(),
+                                            })
+                                            .collect(),
+                                    ),
+                                    Err(_) => PaneData::Empty,
+                                },
                                 "script" => {
                                     if let Some(ref cmd) = pane_command {
                                         match tokio::process::Command::new("sh")
@@ -443,12 +470,17 @@ async fn run(cli: Cli) -> Result<()> {
                                             .await
                                         {
                                             Ok(output) => {
-                                                let stdout = String::from_utf8_lossy(&output.stdout);
-                                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                                let stdout =
+                                                    String::from_utf8_lossy(&output.stdout);
+                                                let stderr =
+                                                    String::from_utf8_lossy(&output.stderr);
                                                 let combined = if stderr.is_empty() {
                                                     stdout.to_string()
                                                 } else {
-                                                    format!("{}\n--- stderr ---\n{}", stdout, stderr)
+                                                    format!(
+                                                        "{}\n--- stderr ---\n{}",
+                                                        stdout, stderr
+                                                    )
                                                 };
                                                 PaneData::Script(combined)
                                             }
@@ -477,12 +509,9 @@ async fn run(cli: Cli) -> Result<()> {
                 });
 
                 // Run conversation on main thread (Conversation is not Send).
-                let conv_result = cli::repl::run_session(
-                    Box::new(tui_channel),
-                    &mut conversation,
-                    &config.repl,
-                )
-                .await;
+                let conv_result =
+                    cli::repl::run_session(Box::new(tui_channel), &mut conversation, &config.repl)
+                        .await;
 
                 // If conversation ended, signal TUI to quit.
                 {

@@ -86,11 +86,7 @@ impl HookRunner {
     ///
     /// Hooks run in registration order. First `Deny` or `ModifyInput` wins.
     /// If all return `Allow`, the tool proceeds with original input.
-    pub async fn run_pre(
-        &self,
-        tool_name: &str,
-        tool_input: &serde_json::Value,
-    ) -> HookDecision {
+    pub async fn run_pre(&self, tool_name: &str, tool_input: &serde_json::Value) -> HookDecision {
         let payload = HookPayload {
             event: HookEvent::PreToolUse,
             tool_name: tool_name.to_string(),
@@ -106,8 +102,7 @@ impl HookRunner {
 
             match hook.on_event(&payload).await {
                 HookDecision::Allow => continue,
-                decision @ HookDecision::Deny { .. }
-                | decision @ HookDecision::ModifyInput(_) => {
+                decision @ HookDecision::Deny { .. } | decision @ HookDecision::ModifyInput(_) => {
                     tracing::debug!(
                         hook = hook.name(),
                         tool = tool_name,
@@ -239,9 +234,7 @@ mod tests {
         let mut runner = HookRunner::new();
         runner.add(Box::new(AllowHook));
 
-        let decision = runner
-            .run_pre("safe_tool", &serde_json::json!({}))
-            .await;
+        let decision = runner.run_pre("safe_tool", &serde_json::json!({})).await;
 
         assert!(matches!(decision, HookDecision::Allow));
     }
@@ -253,9 +246,7 @@ mod tests {
         runner.add(Box::new(DenyHook));
         runner.add(Box::new(ModifyHook)); // should never run
 
-        let decision = runner
-            .run_pre("tool", &serde_json::json!({}))
-            .await;
+        let decision = runner.run_pre("tool", &serde_json::json!({})).await;
 
         assert!(matches!(decision, HookDecision::Deny { .. }));
     }
@@ -263,9 +254,7 @@ mod tests {
     #[tokio::test]
     async fn empty_runner_allows() {
         let runner = HookRunner::new();
-        let decision = runner
-            .run_pre("tool", &serde_json::json!({}))
-            .await;
+        let decision = runner.run_pre("tool", &serde_json::json!({})).await;
 
         assert!(matches!(decision, HookDecision::Allow));
     }

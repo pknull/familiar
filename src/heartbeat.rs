@@ -53,11 +53,16 @@ impl Heartbeat {
         let triggers = match std::fs::read_to_string(&heartbeat_path) {
             Ok(content) => {
                 let config = heartbeat_config::parse(&content);
-                let filtered: Vec<Trigger> = config.triggers.into_iter()
+                let filtered: Vec<Trigger> = config
+                    .triggers
+                    .into_iter()
                     .filter(|t| t.is_heartbeat())
                     .collect();
                 if !filtered.is_empty() {
-                    tracing::info!(count = filtered.len(), "loaded heartbeat triggers from HEARTBEAT.md");
+                    tracing::info!(
+                        count = filtered.len(),
+                        "loaded heartbeat triggers from HEARTBEAT.md"
+                    );
                 }
                 filtered
             }
@@ -157,9 +162,7 @@ impl Heartbeat {
             };
 
             let should_fire = match schedule {
-                "daily" => {
-                    self.trigger_last_run.get(&trigger.action) != Some(&today)
-                }
+                "daily" => self.trigger_last_run.get(&trigger.action) != Some(&today),
                 "hourly" => true, // Fire every tick (tick interval controls frequency)
                 "weekly" => {
                     let last = self.trigger_last_run.get(&trigger.action);
@@ -197,7 +200,10 @@ impl Heartbeat {
                 // Check conversation history size
                 match store.turn_count() {
                     Ok(count) if count > 50 => {
-                        tracing::info!(turns = count, "conversation history eligible for compaction");
+                        tracing::info!(
+                            turns = count,
+                            "conversation history eligible for compaction"
+                        );
                         self.append_daily_log(&format!(
                             "- [{}] compaction: {} turns in history",
                             Local::now().format("%H:%M"),
@@ -284,18 +290,18 @@ mod tests {
         // 22:00 - 08:00
         assert!(!is_quiet_hour(22, 8, 12)); // noon — not quiet
         assert!(!is_quiet_hour(22, 8, 21)); // 9pm — not quiet
-        assert!(is_quiet_hour(22, 8, 22));  // 10pm — quiet
-        assert!(is_quiet_hour(22, 8, 23));  // 11pm — quiet
-        assert!(is_quiet_hour(22, 8, 0));   // midnight — quiet
-        assert!(is_quiet_hour(22, 8, 7));   // 7am — quiet
-        assert!(!is_quiet_hour(22, 8, 8));  // 8am — not quiet
+        assert!(is_quiet_hour(22, 8, 22)); // 10pm — quiet
+        assert!(is_quiet_hour(22, 8, 23)); // 11pm — quiet
+        assert!(is_quiet_hour(22, 8, 0)); // midnight — quiet
+        assert!(is_quiet_hour(22, 8, 7)); // 7am — quiet
+        assert!(!is_quiet_hour(22, 8, 8)); // 8am — not quiet
     }
 
     #[test]
     fn quiet_hours_daytime() {
         // 8:00 - 17:00
-        assert!(is_quiet_hour(8, 17, 12));  // noon — quiet
-        assert!(!is_quiet_hour(8, 17, 7));  // 7am — not quiet
+        assert!(is_quiet_hour(8, 17, 12)); // noon — quiet
+        assert!(!is_quiet_hour(8, 17, 7)); // 7am — not quiet
         assert!(!is_quiet_hour(8, 17, 17)); // 5pm — not quiet
         assert!(!is_quiet_hour(8, 17, 22)); // 10pm — not quiet
     }
