@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::StreamExt;
 use reqwest_eventsource::{Event, EventSource};
@@ -19,18 +19,19 @@ use crate::store::Store;
 use crate::workspace::heartbeat::{self as heartbeat_config, Trigger};
 
 /// Assignment state for a published task.
-#[derive(Debug, Clone)]
+///
+/// Kept as a fieldless enum because the only consumer
+/// (`is_assigned_or_completed`) lumps Assigned and Completed together as
+/// "not Pending"; per-state metadata (servitor identity, timestamps) is
+/// available on the `task_assign` / `task_result` / `task_failed` feed
+/// messages and doesn't need shadow-storage on the local tracker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AssignmentState {
-    /// Task published, waiting for offers.
+    /// Task published, waiting for offers / not yet assigned.
     Pending,
-    /// Offer accepted, task_assign published, waiting for task_started confirmation.
-    Assigned {
-        servitor: String,
-        assigned_at: Instant,
-    },
-    /// task_started received — execution confirmed.
-    Confirmed { servitor: String },
-    /// task_result or task_failed received — complete.
+    /// task_assign published; tracker considers this task in flight.
+    Assigned,
+    /// task_result or task_failed received — terminal.
     Completed,
 }
 
@@ -95,13 +96,11 @@ impl TaskAssignmentTracker {
         self.tasks.contains_key(hash)
     }
 
-    /// Check if a task has already been assigned.
+    /// Check if a task has moved past Pending (Assigned or Completed).
     fn is_assigned_or_completed(&self, hash: &str) -> bool {
         matches!(
             self.tasks.get(hash),
-            Some(AssignmentState::Assigned { .. })
-                | Some(AssignmentState::Confirmed { .. })
-                | Some(AssignmentState::Completed)
+            Some(AssignmentState::Assigned) | Some(AssignmentState::Completed)
         )
     }
 
@@ -113,29 +112,13 @@ impl TaskAssignmentTracker {
             .push(offer);
     }
 
-    /// Mark a task as assigned.
-    fn mark_assigned(&mut self, task_hash: &str, servitor: String) {
-        self.tasks.insert(
-            task_hash.to_string(),
-            AssignmentState::Assigned {
-                servitor,
-                assigned_at: Instant::now(),
-            },
-        );
+    /// Mark a task as assigned (task_assign published).
+    fn mark_assigned(&mut self, task_hash: &str) {
+        self.tasks
+            .insert(task_hash.to_string(), AssignmentState::Assigned);
     }
 
-    /// Mark a task as confirmed (task_started received).
-    fn mark_confirmed(&mut self, task_hash: &str) {
-        if let Some(AssignmentState::Assigned { servitor, .. }) = self.tasks.get(task_hash) {
-            let servitor = servitor.clone();
-            self.tasks.insert(
-                task_hash.to_string(),
-                AssignmentState::Confirmed { servitor },
-            );
-        }
-    }
-
-    /// Mark a task as completed.
+    /// Mark a task as completed (task_result or task_failed received).
     fn mark_completed(&mut self, task_hash: &str) {
         self.tasks
             .insert(task_hash.to_string(), AssignmentState::Completed);
@@ -150,18 +133,6 @@ impl TaskAssignmentTracker {
                 }
             }
         }
-    }
-
-    /// Get the next available (non-withdrawn, non-expired) offer for a task.
-    fn next_available_offer(&self, task_hash: &str) -> Option<&PendingOffer> {
-        self.offers.get(task_hash).and_then(|offers| {
-            offers.iter().find(|o| {
-                !o.withdrawn
-                // TTL check: parse timestamp and compare
-                // For simplicity, we trust the offer is recent enough
-                // (full TTL check would require parsing the timestamp)
-            })
-        })
     }
 }
 
@@ -486,7 +457,7 @@ impl Daemon {
                     assign_hash = hash,
                     "auto-assigned task (first offer wins)"
                 );
-                self.tracker.mark_assigned(task_id, servitor);
+                self.tracker.mark_assigned(task_id);
             }
             Err(e) => {
                 tracing::warn!(
@@ -596,12 +567,15 @@ impl Daemon {
         );
     }
 
-    /// Handle task_started: confirm assignment.
+    /// Handle task_started: log execution observation.
+    ///
+    /// No tracker state change — `Assigned` is the only "in-flight" state in
+    /// the simplified lifecycle, and the tracker doesn't distinguish
+    /// pre-start from post-start. Operators see the start via this trace.
     fn handle_task_started(&mut self, message: &serde_json::Value) -> Result<()> {
         let content = message.get("content").unwrap_or(&serde_json::Value::Null);
         if let Some(task_id) = content.get("task_id").and_then(|t| t.as_str()) {
             if self.tracker.is_tracked(task_id) {
-                self.tracker.mark_confirmed(task_id);
                 tracing::info!(task_id, "task execution confirmed (task_started received)");
             }
         }

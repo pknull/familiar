@@ -102,9 +102,6 @@ pub struct AgentConfig {
     /// Require servitor to have published a matching servitor_profile before accepting offer.
     #[serde(default)]
     pub verify_servitor_profile: bool,
-    /// Seconds to wait for task_started after publishing task_assign (default: 30).
-    #[serde(default = "default_assign_confirm_timeout")]
-    pub assign_confirm_timeout_secs: u64,
     /// Enable background SSE watching in all modes (default: true).
     #[serde(default = "default_background_sse")]
     pub background_sse_enabled: bool,
@@ -122,14 +119,9 @@ impl Default for AgentConfig {
             preserve_recent_turns: default_preserve_recent_turns(),
             trusted_servitors: Vec::new(),
             verify_servitor_profile: false,
-            assign_confirm_timeout_secs: default_assign_confirm_timeout(),
             background_sse_enabled: default_background_sse(),
         }
     }
-}
-
-fn default_assign_confirm_timeout() -> u64 {
-    30
 }
 
 fn default_background_sse() -> bool {
