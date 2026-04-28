@@ -12,7 +12,7 @@ use serenity::all::{
 };
 use tokio::sync::{mpsc, RwLock};
 
-use super::{Channel, ChannelMessage};
+use super::{Channel, ChannelMessage, TextCallback};
 use crate::config::DiscordConfig;
 use crate::error::{FamiliarError, Result};
 
@@ -109,11 +109,25 @@ impl Channel for DiscordChannel {
         Ok(())
     }
 
+    async fn respond_error(&self, text: &str) -> Result<()> {
+        // Discord doesn't stream visibly, so respond() never suppresses;
+        // delegate.
+        self.respond(text).await
+    }
+
     async fn stream_chunk(&self, _chunk: &str) -> Result<()> {
         // Discord doesn't support real-time streaming.
         // Chunks accumulate and send on respond().
         // For now, no-op. Could edit a message in-place for streaming UX later.
         Ok(())
+    }
+
+    fn stream_callback(&self) -> Option<TextCallback> {
+        // Discord has no live-chunk surface, but we still want the provider
+        // to use its streaming endpoint for lower time-to-first-byte. Return
+        // a no-op closure: provider streams, chunks are dropped, the full
+        // response goes out via `respond()` once the conversation completes.
+        Some(Arc::new(|_chunk: &str| {}))
     }
 }
 

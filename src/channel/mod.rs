@@ -8,9 +8,21 @@ pub mod discord;
 pub mod repl;
 pub mod tui_channel;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::error::Result;
+
+/// Sync callback invoked by the LLM provider on each streamed text chunk.
+///
+/// Channels construct one of these per response (`Channel::stream_callback`)
+/// to decide how partial text is rendered. The provider-side streaming path
+/// is engaged whenever this is `Some(_)`; passing `None` falls back to the
+/// non-streaming chat call. Discord, which has no live-streaming surface,
+/// returns `Some(noop)` so the provider streaming path is preserved (lower
+/// time-to-first-byte) without producing visible chunk output.
+pub type TextCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// An incoming message from any channel.
 #[derive(Debug, Clone)]
@@ -59,11 +71,52 @@ pub trait Channel: Send {
     async fn next(&mut self) -> Option<ChannelMessage>;
 
     /// Send a final response back through the channel.
+    ///
+    /// Driver passes the canonical full response text after
+    /// `conversation.send`. Each implementation decides whether to render
+    /// (no streaming happened), suppress (streaming already showed it), or
+    /// finalize a streaming surface.
     async fn respond(&self, text: &str) -> Result<()>;
 
+    /// Send an error message that must always be rendered, regardless of
+    /// whether streaming was in progress when the error occurred. Channels
+    /// that suppress `respond` text after streaming must override this so
+    /// the error is still visible.
+    async fn respond_error(&self, text: &str) -> Result<()>;
+
     /// Send a streaming text chunk (partial response).
-    /// For REPL this prints immediately. For Discord this might edit a message.
+    ///
+    /// Legacy hook retained for compatibility; the canonical streaming path is
+    /// `stream_callback`, which produces a sync `TextCallback` the LLM
+    /// provider can invoke directly. New channel implementations should
+    /// prefer `stream_callback` and treat this method as a no-op.
     async fn stream_chunk(&self, chunk: &str) -> Result<()>;
+
+    /// Construct a fresh streaming callback for one response.
+    ///
+    /// Returning `Some(_)` engages the provider's streaming path (lower
+    /// time-to-first-byte) and lets the channel decide how chunks render.
+    /// Returning `None` uses the non-streaming chat call. Channels with no
+    /// streaming UX but that still want streaming for latency should return
+    /// `Some(noop_callback)`. The closure is created fresh per call so any
+    /// per-response state (e.g. "first chunk") lives on the closure, not on
+    /// the channel itself.
+    fn stream_callback(&self) -> Option<TextCallback> {
+        None
+    }
+
+    /// Optional one-shot session-start banner. Default no-op. REPL prints to
+    /// stdout; TUI/Discord ignore (those surfaces aren't a place for chrome).
+    /// Sync because every current implementation is either println or a no-op;
+    /// a future async-banner channel can spawn from inside.
+    fn session_banner(&self, _text: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Optional one-shot session-end banner. Default no-op.
+    fn session_goodbye(&self, _text: &str) -> Result<()> {
+        Ok(())
+    }
 
     /// Present a network task to the operator for accept/reject decision.
     ///

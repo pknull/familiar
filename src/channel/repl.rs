@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
-use super::{Channel, ChannelMessage, TaskDecision, TaskPresentation};
+use super::{Channel, ChannelMessage, TaskDecision, TaskPresentation, TextCallback};
 use crate::config::ReplConfig;
 use crate::error::{FamiliarError, Result};
 
@@ -19,6 +19,11 @@ pub struct ReplChannel {
     config: ReplConfig,
     /// Shared flag: true while the LLM is generating a response.
     responding: Arc<AtomicBool>,
+    /// Shared flag: true once the current response has had any chunks
+    /// rendered via the stream_callback closure. `respond` reads this to
+    /// decide whether to print the full text (no streaming happened) or
+    /// just terminate the streamed line with a newline.
+    streamed: Arc<AtomicBool>,
 }
 
 impl ReplChannel {
@@ -41,6 +46,7 @@ impl ReplChannel {
             history_path,
             config,
             responding: Arc::new(AtomicBool::new(false)),
+            streamed: Arc::new(AtomicBool::new(false)),
         };
 
         let _ = channel.editor.load_history(&channel.history_path);
@@ -91,7 +97,11 @@ impl Channel for ReplChannel {
 
                     let _ = self.editor.add_history_entry(&input);
 
-                    // Show thinking indicator immediately
+                    // Reset streaming flag for this turn before showing the
+                    // thinking indicator. The stream_callback closure will
+                    // flip it on first chunk so respond() knows whether the
+                    // line has already been rendered.
+                    self.streamed.store(false, Ordering::SeqCst);
                     self.show_thinking();
 
                     return Some(ChannelMessage {
@@ -116,7 +126,33 @@ impl Channel for ReplChannel {
     }
 
     async fn respond(&self, text: &str) -> Result<()> {
-        self.done_responding();
+        // Drop thinking indicator if it was still showing (no chunks arrived).
+        if self.responding.load(Ordering::SeqCst) {
+            self.clear_thinking();
+            self.done_responding();
+        }
+
+        if self.streamed.load(Ordering::SeqCst) {
+            // Streaming wrote the response to stdout already — just terminate
+            // the streamed line so the next user prompt starts cleanly.
+            println!();
+        } else if !text.is_empty() {
+            println!("{}", text);
+        }
+        Ok(())
+    }
+
+    async fn respond_error(&self, text: &str) -> Result<()> {
+        // Errors must always be visible, even after partial streaming. Drop
+        // the spinner if it's up, terminate any in-flight streamed line, then
+        // print the error text on its own line.
+        if self.responding.load(Ordering::SeqCst) {
+            self.clear_thinking();
+            self.done_responding();
+        }
+        if self.streamed.load(Ordering::SeqCst) {
+            println!();
+        }
         if !text.is_empty() {
             println!("{}", text);
         }
@@ -125,13 +161,55 @@ impl Channel for ReplChannel {
 
     async fn stream_chunk(&self, chunk: &str) -> Result<()> {
         use std::io::Write;
-        // First chunk clears the thinking indicator
+        // Legacy path; still honored if a caller uses it directly. The
+        // canonical streaming path is `stream_callback`.
         if self.responding.load(Ordering::SeqCst) {
             self.clear_thinking();
             self.done_responding();
         }
+        self.streamed.store(true, Ordering::SeqCst);
         print!("{}", chunk);
         let _ = std::io::stdout().flush();
+        Ok(())
+    }
+
+    fn stream_callback(&self) -> Option<TextCallback> {
+        // Capture only what the closure needs: the prompt prefix string,
+        // the responding/streamed Arc<AtomicBool>s. Per-response state
+        // (first_chunk) is fresh on each call.
+        let prefix = self.config.familiar_prompt.clone();
+        let responding = Arc::clone(&self.responding);
+        let streamed = Arc::clone(&self.streamed);
+        let first_chunk = Arc::new(AtomicBool::new(true));
+
+        Some(Arc::new(move |chunk: &str| {
+            use std::io::Write;
+            // First chunk clears the thinking indicator and prints the prompt
+            // prefix on a fresh line; subsequent chunks just stream through.
+            if first_chunk.swap(false, Ordering::SeqCst) {
+                streamed.store(true, Ordering::SeqCst);
+                if responding.load(Ordering::SeqCst) {
+                    responding.store(false, Ordering::SeqCst);
+                }
+                print!("\r\x1b[2K\n{}{}", prefix, chunk);
+            } else {
+                print!("{}", chunk);
+            }
+            let _ = std::io::stdout().flush();
+        }))
+    }
+
+    fn session_banner(&self, text: &str) -> Result<()> {
+        if !text.is_empty() {
+            println!("{}", text);
+        }
+        Ok(())
+    }
+
+    fn session_goodbye(&self, text: &str) -> Result<()> {
+        if !text.is_empty() {
+            println!("{}", text);
+        }
         Ok(())
     }
 

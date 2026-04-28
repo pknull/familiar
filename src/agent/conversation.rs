@@ -15,11 +15,9 @@ use crate::error::{FamiliarError, Result};
 use crate::hooks::{HookDecision, HookRunner};
 use crate::mcp::{LlmTool, McpPool};
 use crate::profile::{self, Profile};
+use crate::channel::TextCallback;
 use crate::store::Store;
 use crate::workspace::Workspace;
-
-/// Callback for streaming text chunks. Arc-wrapped to satisfy async lifetime requirements.
-pub type TextCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Accumulated token usage across a conversation turn (may span multiple LLM calls).
 #[derive(Debug, Clone, Default)]

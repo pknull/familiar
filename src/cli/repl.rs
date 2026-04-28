@@ -1,6 +1,11 @@
 //! Interactive session — drives a Channel + Conversation pair.
-
-use std::sync::Arc;
+//!
+//! All channel-specific UX (terminal chrome, streaming render, banners) lives
+//! in the channel implementations. This driver is transport-agnostic: it
+//! orchestrates `next` → `conversation.send` → `respond`, asks the channel
+//! for a streaming callback, and surfaces session-start / session-end
+//! banners through optional channel hooks (default no-op for non-REPL
+//! surfaces).
 
 use crate::agent::conversation::Conversation;
 use crate::channel::Channel;
@@ -11,19 +16,27 @@ use crate::error::Result;
 pub async fn run_session(
     mut channel: Box<dyn Channel>,
     conversation: &mut Conversation,
-    repl_config: &ReplConfig,
+    _repl_config: &ReplConfig,
 ) -> Result<()> {
-    println!("familiar v{}", env!("CARGO_PKG_VERSION"));
-    println!("Type /quit to exit, /context to show saved context.\n");
+    let _ = channel.session_banner(&format!(
+        "familiar v{}\nType /quit to exit, /context to show saved context.\n",
+        env!("CARGO_PKG_VERSION")
+    ));
 
     while let Some(msg) = channel.next().await {
         let input = msg.content.trim();
 
-        // Handle commands — clear thinking indicator first
+        // Handle commands
         if input.starts_with('/') {
-            let _ = channel.respond("").await; // clears thinking state
             match input {
-                "/quit" | "/exit" | "/q" => break,
+                "/quit" | "/exit" | "/q" => {
+                    // Channels (e.g. REPL) may have set a thinking
+                    // indicator inside next(); calling respond("") clears
+                    // it so the goodbye banner doesn't print into a
+                    // dirty line.
+                    let _ = channel.respond("").await;
+                    break;
+                }
                 "/context" => {
                     match conversation.list_context() {
                         Ok(pairs) => {
@@ -93,38 +106,26 @@ pub async fn run_session(
             }
         }
 
-        // The thinking indicator is already showing from channel.next().
-        // When the first LLM chunk arrives, stream_chunk clears it and
-        // prints the familiar prompt prefix + chunk.
-        let prefix = repl_config.familiar_prompt.clone();
-        let first_chunk = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let first_chunk_cb = Arc::clone(&first_chunk);
+        // Ask the channel for its streaming callback. Each channel decides
+        // how chunks render (REPL: stdout with first-chunk ANSI clear + prompt
+        // prefix; TUI: mpsc events into the TUI loop; Discord: noop, but the
+        // provider still uses its streaming endpoint for latency).
+        let stream_cb = channel.stream_callback();
 
-        let stream_cb = Arc::new(move |chunk: &str| {
-            use std::io::Write;
-            if first_chunk_cb.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                print!("\r\x1b[2K\n{}{}", prefix, chunk);
-            } else {
-                print!("{}", chunk);
-            }
-            let _ = std::io::stdout().flush();
-        });
-
-        match conversation.send(input, Some(stream_cb)).await {
-            Ok(_) => {
-                // If we never got a chunk, clear thinking anyway
-                if first_chunk.load(std::sync::atomic::Ordering::SeqCst) {
-                    print!("\r\x1b[2K");
-                }
-                let _ = channel.respond("\n").await;
+        match conversation.send(input, stream_cb).await {
+            Ok((response_text, _usage)) => {
+                // Hand the canonical full response to the channel. Each
+                // channel's respond() decides whether to render the text
+                // (no streaming happened) or just finalize without
+                // duplicating chunks already shown.
+                let _ = channel.respond(&response_text).await;
             }
             Err(e) => {
-                print!("\r\x1b[2K");
-                let _ = channel.respond(&format!("\nerror: {}\n", e)).await;
+                let _ = channel.respond_error(&format!("error: {}", e)).await;
             }
         }
     }
 
-    println!("goodbye.");
+    let _ = channel.session_goodbye("goodbye.");
     Ok(())
 }
