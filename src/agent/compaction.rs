@@ -3,7 +3,7 @@
 //! Uses the configured LLM provider to distill conversation turns into a structured
 //! summary with labeled sections, preserving high-signal context while pruning noise.
 
-use crate::agent::providers::{Message, Provider};
+use thallus_core::provider::{Message, Provider};
 use crate::error::Result;
 
 const COMPACTION_PROMPT: &str = r#"You are compacting a conversation history to save context space.

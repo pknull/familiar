@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::agent::providers::{
+use thallus_core::provider::{
     cache::CompletionCache, pricing, ContentBlock, Message, Provider, StopReason, StreamEvent,
 };
 use crate::config::{AgentConfig, ToolTrustConfig, TrustLevel};

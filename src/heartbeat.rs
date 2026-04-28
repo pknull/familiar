@@ -12,7 +12,7 @@ use std::time::Duration;
 use chrono::{Datelike, Local, Timelike};
 use tokio::time;
 
-use crate::agent::providers::{Message, Provider};
+use thallus_core::provider::{Message, Provider};
 use crate::store::Store;
 use crate::workspace::heartbeat::{self as heartbeat_config, Trigger};
 

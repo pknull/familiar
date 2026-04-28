@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::agent::conversation::Conversation;
-use crate::agent::providers::create_provider;
+use thallus_core::provider::create_provider;
 use crate::config::Config;
 use crate::egregore::EgregoreClient;
 use crate::error::{FamiliarError, Result};
