@@ -169,6 +169,12 @@ async fn run(cli: Cli) -> Result<()> {
     let provider = create_provider(llm_config)?;
     tracing::info!(provider = provider.name(), "LLM provider ready");
 
+    // Initialize workspace (prompt assembly from ~/.familiar/workspace/) — built
+    // early so background tasks (heartbeat, daemon SSE-triggers) can share clones.
+    let workspace_dir = Config::expand_path("~/.familiar/workspace");
+    let workspace = workspace::Workspace::new(&workspace_dir)?;
+    tracing::info!(path = %workspace_dir, "workspace initialized");
+
     // Start heartbeat background task if enabled
     if config.heartbeat.enabled {
         let hb_llm_config = llm_config.clone();
@@ -177,7 +183,7 @@ async fn run(cli: Cli) -> Result<()> {
         let hb = heartbeat::Heartbeat::new(
             hb_provider,
             hb_store_path,
-            Config::expand_path("~/.familiar/workspace/daily"),
+            workspace.clone(),
             std::time::Duration::from_secs(config.heartbeat.interval_secs),
             config.heartbeat.quiet_start,
             config.heartbeat.quiet_end,
@@ -189,13 +195,10 @@ async fn run(cli: Cli) -> Result<()> {
         );
     }
 
-    // Initialize workspace (prompt assembly from ~/.familiar/workspace/)
-    let workspace_dir = Config::expand_path("~/.familiar/workspace");
-    let workspace = workspace::Workspace::new(&workspace_dir)?;
-    tracing::info!(path = %workspace_dir, "workspace initialized");
-
     // Clone egregore client for sidebar pane pollers (before move into conversation).
     let egregore_for_panes = egregore.clone();
+    // Clone workspace for daemon (consumed below if Daemon command is dispatched).
+    let daemon_workspace = workspace.clone();
 
     // Build conversation engine
     let model_name = llm_config.model.clone();
@@ -227,6 +230,7 @@ async fn run(cli: Cli) -> Result<()> {
                 store_path,
                 config.daemon.clone(),
                 config.agent.clone(),
+                daemon_workspace,
             );
             tracing::info!("running as daemon");
             daemon.run().await?;

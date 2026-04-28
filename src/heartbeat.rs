@@ -25,7 +25,7 @@ const SYSTEM_PROMPT: &str =
 pub struct Heartbeat {
     provider: Box<dyn Provider>,
     store_path: String,
-    workspace_daily_dir: String,
+    workspace: crate::workspace::Workspace,
     interval: Duration,
     quiet_start: u32,
     quiet_end: u32,
@@ -42,7 +42,7 @@ impl Heartbeat {
     pub fn new(
         provider: Box<dyn Provider>,
         store_path: String,
-        workspace_daily_dir: String,
+        workspace: crate::workspace::Workspace,
         interval: Duration,
         quiet_start: u32,
         quiet_end: u32,
@@ -72,7 +72,7 @@ impl Heartbeat {
         Self {
             provider,
             store_path,
-            workspace_daily_dir,
+            workspace,
             interval,
             quiet_start,
             quiet_end,
@@ -245,25 +245,11 @@ impl Heartbeat {
         is_quiet_hour(self.quiet_start, self.quiet_end, hour)
     }
 
-    /// Append an entry to today's daily log in the workspace.
+    /// Append an entry to today's daily log in the workspace. Swallow errors
+    /// with a tracing warning — the heartbeat must not abort on log-write
+    /// failures.
     fn append_daily_log(&self, entry: &str) {
-        let workspace_dir = std::path::PathBuf::from(&self.workspace_daily_dir);
-
-        if !workspace_dir.exists() {
-            let _ = std::fs::create_dir_all(&workspace_dir);
-        }
-
-        let today = Local::now().format("%Y-%m-%d");
-        let path = workspace_dir.join(format!("{}.md", today));
-
-        let mut content = std::fs::read_to_string(&path).unwrap_or_default();
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str(entry);
-        content.push('\n');
-
-        if let Err(e) = std::fs::write(&path, content) {
+        if let Err(e) = self.workspace.append_daily_log(entry) {
             tracing::warn!(error = %e, "failed to write daily log");
         }
     }

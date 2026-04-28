@@ -183,6 +183,7 @@ pub struct Daemon {
     store_path: String,
     scope: crate::config::DaemonConfig,
     agent_config: crate::config::AgentConfig,
+    workspace: crate::workspace::Workspace,
     tracker: TaskAssignmentTracker,
     servitor_profiles: HashMap<String, ObservedServitorProfile>,
     servitor_manifests: HashMap<String, ObservedServitorManifest>,
@@ -200,6 +201,7 @@ impl Daemon {
         store_path: String,
         scope: crate::config::DaemonConfig,
         agent_config: crate::config::AgentConfig,
+        workspace: crate::workspace::Workspace,
     ) -> Self {
         // Load HEARTBEAT.md triggers for SSE-driven proactive behavior
         let workspace_dir = crate::config::Config::expand_path("~/.familiar/workspace");
@@ -231,6 +233,7 @@ impl Daemon {
             store_path,
             scope,
             agent_config,
+            workspace,
             tracker: TaskAssignmentTracker::new(),
             servitor_profiles: HashMap::new(),
             servitor_manifests: HashMap::new(),
@@ -990,25 +993,18 @@ impl Daemon {
                     "SSE trigger fired"
                 );
 
-                // Append to daily log
-                let workspace_dir =
-                    crate::config::Config::expand_path("~/.familiar/workspace/daily");
-                let daily_dir = std::path::Path::new(&workspace_dir);
-                if !daily_dir.exists() {
-                    let _ = std::fs::create_dir_all(daily_dir);
-                }
-                let today = chrono::Local::now().format("%Y-%m-%d");
-                let log_path = daily_dir.join(format!("{}.md", today));
+                // Append to daily log via the canonical Workspace helper. Entry
+                // is passed without a trailing \n; the helper appends one.
                 let entry = format!(
-                    "- [{}] trigger:{} fired (type={}, author={})\n",
+                    "- [{}] trigger:{} fired (type={}, author={})",
                     chrono::Local::now().format("%H:%M"),
                     trigger.action,
                     msg_type,
                     author,
                 );
-                let mut content = std::fs::read_to_string(&log_path).unwrap_or_default();
-                content.push_str(&entry);
-                let _ = std::fs::write(&log_path, content);
+                if let Err(e) = self.workspace.append_daily_log(&entry) {
+                    tracing::warn!(error = %e, "failed to append SSE-trigger daily log entry");
+                }
             }
         }
     }

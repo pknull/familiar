@@ -39,6 +39,7 @@ const ORDERED_FILES: &[(&str, &str)] = &[
 const PRIVATE_FILES: &[&str] = &["MEMORY.md", "USER.md"];
 
 /// Workspace manager — reads, writes, and assembles prompt from workspace files.
+#[derive(Clone)]
 pub struct Workspace {
     dir: PathBuf,
 }
@@ -288,20 +289,74 @@ impl Workspace {
             .join(format!("daily/{}.md", today.format("%Y-%m-%d")))
     }
 
-    /// Append to today's daily log.
+    /// Append to today's daily log. Uses `OpenOptions::append` plus a single
+    /// `write_all` so two concurrent writers (e.g. heartbeat + daemon) don't
+    /// lose updates the way a read-modify-write cycle would. On POSIX,
+    /// append-mode writes guarantee each `write_all` lands at end-of-file
+    /// without interleaving with other appenders. The trailing newline is
+    /// added by this helper — callers pass the entry WITHOUT a trailing `\n`.
     pub fn append_daily_log(&self, entry: &str) -> Result<()> {
-        let path = self.daily_log_path();
-        let mut content = std::fs::read_to_string(&path).unwrap_or_default();
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str(entry);
-        content.push('\n');
+        use std::io::{Read, Seek, SeekFrom, Write};
 
-        // Daily logs bypass injection scanning (agent-generated summaries)
-        std::fs::write(&path, content).map_err(|e| FamiliarError::Internal {
-            reason: format!("failed to append daily log: {}", e),
-        })?;
+        let path = self.daily_log_path();
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(|e| FamiliarError::Internal {
+                    reason: format!("failed to create daily log dir: {}", e),
+                })?;
+            }
+        }
+
+        // Preserve the canonical implementation's "ensure separator before new
+        // entry" invariant: if the file already exists and its last byte is not
+        // a newline (e.g. previous writer crashed mid-line, or external edit),
+        // prepend a newline so the new entry starts on its own line.
+        let needs_leading_newline = match std::fs::metadata(&path) {
+            Ok(meta) if meta.len() > 0 => {
+                let mut probe =
+                    std::fs::File::open(&path).map_err(|e| FamiliarError::Internal {
+                        reason: format!("failed to probe daily log: {}", e),
+                    })?;
+                probe
+                    .seek(SeekFrom::End(-1))
+                    .map_err(|e| FamiliarError::Internal {
+                        reason: format!("failed to seek daily log: {}", e),
+                    })?;
+                let mut buf = [0u8; 1];
+                probe
+                    .read_exact(&mut buf)
+                    .map_err(|e| FamiliarError::Internal {
+                        reason: format!("failed to read daily log tail: {}", e),
+                    })?;
+                buf[0] != b'\n'
+            }
+            _ => false,
+        };
+
+        // Daily logs bypass injection scanning (agent-generated summaries).
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| FamiliarError::Internal {
+                reason: format!("failed to open daily log: {}", e),
+            })?;
+
+        // Single write_all so the record reaches disk atomically (POSIX
+        // O_APPEND + buffer < PIPE_BUF). Allocating a small Vec up front is
+        // cheaper than two separate writes that could interleave with another
+        // appender.
+        let mut payload = Vec::with_capacity(entry.len() + 2);
+        if needs_leading_newline {
+            payload.push(b'\n');
+        }
+        payload.extend_from_slice(entry.as_bytes());
+        payload.push(b'\n');
+
+        file.write_all(&payload)
+            .map_err(|e| FamiliarError::Internal {
+                reason: format!("failed to append daily log: {}", e),
+            })?;
         Ok(())
     }
 }
@@ -397,5 +452,31 @@ mod tests {
         let content = std::fs::read_to_string(ws.daily_log_path()).unwrap();
         assert!(content.contains("First entry"));
         assert!(content.contains("Second entry"));
+        // Both entries land as separate lines (no concatenation).
+        assert!(content.contains("First entry\nSecond entry\n"));
+    }
+
+    /// Regression for the newline-normalization branch in append_daily_log:
+    /// if the existing file does not end in `\n` (external edit, prior crash,
+    /// etc.), the helper must prepend a separator so the new entry starts on
+    /// its own line rather than concatenating with the partial last line.
+    #[test]
+    fn daily_log_append_normalizes_missing_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+
+        // Pre-seed today's log with content that does not end in `\n`.
+        let path = ws.daily_log_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "Pre-existing line without trailing newline").unwrap();
+
+        ws.append_daily_log("New entry").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("Pre-existing line without trailing newline\nNew entry\n"),
+            "missing-trailing-newline file was not normalized: {:?}",
+            content
+        );
     }
 }
