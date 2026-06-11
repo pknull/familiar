@@ -129,6 +129,14 @@ impl Store {
             }
         }
 
+        // Enforce foreign keys so pruning a session cascades to its threads
+        // and conversation rows (ON DELETE CASCADE) instead of orphaning them.
+        // Per-connection in SQLite, so it must be set on every open.
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|e| FamiliarError::Store {
+                reason: format!("failed to enable foreign keys: {}", e),
+            })?;
+
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
@@ -138,6 +146,7 @@ impl Store {
     #[cfg(test)]
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         let store = Self { conn };
         store.migrate()?;
         Ok(store)

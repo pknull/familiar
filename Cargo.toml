@@ -41,6 +41,8 @@ ratatui-textarea = "0.8.0"
 [dev-dependencies]
 tempfile = "3"
 tokio-test = "0.4"
+# Raw keyed access in tests to corrupt the store and force bind failures.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher"] }
 
 [lib]
 name = "familiar"

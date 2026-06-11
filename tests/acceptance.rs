@@ -10,9 +10,60 @@ use familiar::config::{DaemonConfig, ToolTrustConfig, TrustLevel};
 use familiar::profile::{extract::extract_signals, Profile};
 use familiar::store::Store;
 use familiar::workspace::{heartbeat, Workspace};
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
 use thallus_core::config::LlmConfig;
 use thallus_core::provider::MockProvider;
+
+// $HOME is process-global, and every Store keys its SQLCipher DB against
+// $HOME/.familiar/store.key. Any test that opens a Store therefore shares this
+// state: they pin $HOME to one stable temp dir (set exactly once) and serialize
+// on TEST_LOCK so a reset never races a concurrent open. Test DBs stay isolated
+// via per-test TempDirs.
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+static TEST_HOME: OnceLock<PathBuf> = OnceLock::new();
+
+/// Serialize $HOME-dependent tests. Poison-tolerant so one failing test does
+/// not cascade PoisonError into every later test.
+fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Pin $HOME to one stable temp dir for the whole binary (set once).
+fn test_home() -> PathBuf {
+    TEST_HOME
+        .get_or_init(|| {
+            let dir = TempDir::new().unwrap().keep();
+            std::env::set_var("HOME", &dir);
+            dir
+        })
+        .clone()
+}
+
+/// Reset per-test state under the pinned $HOME (profile, workspace), but
+/// PRESERVE store.key: it is the SQLCipher key for every Store in the process,
+/// and wiping it mid-run corrupts a concurrently-open store. DB isolation comes
+/// from per-test TempDirs, not from clearing the key.
+fn reset_home() -> PathBuf {
+    let home = test_home();
+    let familiar = home.join(".familiar");
+    std::fs::create_dir_all(&familiar).unwrap();
+    if let Ok(entries) = std::fs::read_dir(&familiar) {
+        for entry in entries.flatten() {
+            if entry.file_name() == "store.key" {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    home
+}
 
 fn workspace_in(tmp: &TempDir) -> Workspace {
     Workspace::new(tmp.path().join("workspace")).expect("workspace init")
@@ -202,6 +253,10 @@ fn group_context_excludes_daily_logs_and_extras() {
 /// verify the session is still listed.
 #[test]
 fn sessions_persist_across_reopen() {
+    // Reopen across a gap requires a stable SQLCipher key, so pin $HOME and
+    // serialize against $HOME-resetting tests.
+    let _g = lock_tests();
+    test_home();
     let tmp = TempDir::new().unwrap();
     let db = tmp.path().join("store.db");
 
@@ -226,6 +281,8 @@ fn sessions_persist_across_reopen() {
 /// crate-internal unit test in store/sessions.rs.
 #[test]
 fn fork_clones_thread_history() {
+    let _g = lock_tests();
+    test_home();
     let tmp = TempDir::new().unwrap();
     let store = Store::open(&tmp.path().join("store.db")).unwrap();
     let sid = store.create_session("original").unwrap();
@@ -272,6 +329,8 @@ async fn compaction_summarizes_via_provider() {
 /// §2 AC: idle sessions are pruned after the configured timeout.
 #[test]
 fn idle_sessions_pruned() {
+    let _g = lock_tests();
+    test_home();
     let tmp = TempDir::new().unwrap();
     let store = Store::open(&tmp.path().join("store.db")).unwrap();
     store.create_session("stale").unwrap();
@@ -283,27 +342,10 @@ fn idle_sessions_pruned() {
     assert!(store.list_sessions().unwrap().is_empty());
 }
 
-/// KNOWN GAP (§2 `[~]`): the live conversation loop writes flat turns
-/// (thread_id NULL), so a resumed session's thread history is always empty,
-/// and nothing sets current_session_id so REPL /fork no-ops. Promote the
-/// resume/fork items to [x] when conversation turns are thread-keyed and
-/// this passes unignored.
-#[test]
-#[ignore = "gap: live turns are not thread-keyed; current_session_id never set"]
-fn resume_carries_live_conversation_history() {
-    let tmp = TempDir::new().unwrap();
-    let store = Store::open(&tmp.path().join("store.db")).unwrap();
-    // Simulate what the live loop does today:
-    store.add_turn("user", "hello", None).unwrap();
-    let sid = store.create_session("resumable").unwrap();
-    let tid = store.resolve_thread(&sid, "repl", None).unwrap();
-    // For resume to work, the live path must land turns in the thread:
-    let turns = store.thread_recent_turns(&tid, 10).unwrap();
-    assert!(
-        !turns.is_empty(),
-        "resumed thread should contain the conversation history"
-    );
-}
+// §2 resume + fork (formerly the [~] gap): live turns are now thread-keyed
+// and current_session_id is set on first channel bind, so resume reattaches
+// real history and fork clones it. Covered end-to-end in the harness module
+// (resume_reattaches_live_history, fork_clones_live_session).
 
 // ---------------------------------------------------------------------------
 // §3 Proactive Intelligence
@@ -453,6 +495,7 @@ fn remaining_acceptance_debt() {
 #[allow(clippy::await_holding_lock)]
 mod harness {
     use super::*;
+    use super::{lock_tests, reset_home};
     use familiar::agent::conversation::Conversation;
     use familiar::config::AgentConfig;
     use familiar::daemon::Daemon;
@@ -460,33 +503,12 @@ mod harness {
     use familiar::heartbeat::Heartbeat;
     use familiar::mcp::McpPool;
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
     use thallus_core::provider::mock::CallRecorder;
 
-    static HARNESS_LOCK: Mutex<()> = Mutex::new(());
-    static TEST_HOME: OnceLock<PathBuf> = OnceLock::new();
-
-    /// Serialize $HOME-dependent tests. Poison-tolerant: a failing test
-    /// must not cascade into PoisonError failures in every later test.
+    // $HOME pinning, the test lock, and reset_home live at file scope so the
+    // non-harness Store-reopen tests share the exact same serialization.
     fn lock_harness() -> std::sync::MutexGuard<'static, ()> {
-        HARNESS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// One shared fake $HOME for the whole test binary; set before any
-    /// harness object resolves `~`. Tests serialize and wipe ~/.familiar.
-    fn test_home() -> &'static PathBuf {
-        TEST_HOME.get_or_init(|| {
-            let dir = TempDir::new().unwrap().keep();
-            std::env::set_var("HOME", &dir);
-            dir
-        })
-    }
-
-    fn reset_home() -> PathBuf {
-        let home = test_home().clone();
-        let _ = std::fs::remove_dir_all(home.join(".familiar"));
-        std::fs::create_dir_all(home.join(".familiar")).unwrap();
-        home
+        lock_tests()
     }
 
     fn llm_config(model: &str, canned: &str) -> LlmConfig {
@@ -658,19 +680,30 @@ mod harness {
             McpPool::new(),
         );
 
-        {
+        // Establish the channel thread, then seed filler turns into it.
+        built.conversation.set_channel("repl").unwrap();
+        let sid = {
             let store = Store::open(&built.store_db).unwrap();
+            let sid = store.get_context("current_session_id").unwrap().unwrap();
+            let tid = store.resolve_thread(&sid, "repl", None).unwrap();
             for i in 0..8 {
                 store
-                    .add_turn("user", &format!("filler {} {}", i, "x".repeat(400)), None)
+                    .add_session_turn(
+                        &tid,
+                        "user",
+                        &format!("filler {} {}", i, "x".repeat(400)),
+                        None,
+                    )
                     .unwrap();
             }
-        }
+            sid
+        };
 
         built.conversation.send("hi", None).await.unwrap();
 
         let store = Store::open(&built.store_db).unwrap();
-        let turns = store.recent_turns(100).unwrap();
+        let tid = store.resolve_thread(&sid, "repl", None).unwrap();
+        let turns = store.thread_turns(&tid, 100).unwrap();
         let summary = turns
             .iter()
             .find(|t| t.role == "system" && t.content.starts_with("[Compacted Context]"));
@@ -1192,6 +1225,111 @@ triggers:
         );
     }
 
+    /// §4 isolation on a BOUND conversation: the same long-lived Conversation
+    /// (as Discord uses for DMs + all guild channels) must not replay a
+    /// private channel's history into a group channel, nor vice versa, once
+    /// real per-channel threads are bound via set_channel.
+    #[tokio::test]
+    async fn bound_conversation_isolates_channels() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let mut built = build_conversation(
+            &tmp,
+            "mock",
+            "reply",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+
+        // Private DM channel: a secret turn lands in its own thread.
+        built.conversation.set_group_context(false);
+        built.conversation.set_channel("repl").unwrap();
+        built
+            .conversation
+            .send("private-secret-xyzzy", None)
+            .await
+            .unwrap();
+
+        // Same Conversation switches to a guild channel and replies there.
+        built.conversation.set_group_context(true);
+        built.conversation.set_channel("discord:guild-7").unwrap();
+        built.conversation.send("hello group", None).await.unwrap();
+        let group_msgs = format!("{:?}", built.recorder.calls().last().unwrap().messages);
+        assert!(
+            !group_msgs.contains("private-secret-xyzzy"),
+            "private history must not replay into a guild channel: {}",
+            group_msgs
+        );
+
+        // And back to the private channel: the guild turn must not appear,
+        // and the original private turn is still there.
+        built.conversation.set_group_context(false);
+        built.conversation.set_channel("repl").unwrap();
+        built.conversation.send("back to dm", None).await.unwrap();
+        let dm_msgs = format!("{:?}", built.recorder.calls().last().unwrap().messages);
+        assert!(
+            dm_msgs.contains("private-secret-xyzzy"),
+            "private channel must retain its own history"
+        );
+        assert!(
+            !dm_msgs.contains("hello group"),
+            "group input must not leak into the private channel"
+        );
+    }
+
+    /// A failed channel bind must fail SAFE: the conversation goes ephemeral
+    /// (thread cleared), never retaining the previous channel's thread. Forces
+    /// a genuine resolve_thread error (dropping the threads table out from
+    /// under the live store) so the fail-safe ordering in set_channel is
+    /// guarded by a test — a future reorder that clears `thread` AFTER the
+    /// fallible calls would replay the prior private thread and fail here.
+    #[tokio::test]
+    async fn failed_bind_fails_safe_to_ephemeral() {
+        let _g = lock_harness();
+        let home = reset_home();
+        let tmp = TempDir::new().unwrap();
+        let mut built = build_conversation(
+            &tmp,
+            "mock",
+            "reply",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+        built.conversation.set_channel("repl").unwrap();
+        built
+            .conversation
+            .send("private-secret-xyzzy", None)
+            .await
+            .unwrap();
+
+        // Corrupt the store via a raw keyed connection so the NEXT bind's
+        // resolve_thread errors (no such table: threads).
+        {
+            let key = std::fs::read_to_string(home.join(".familiar/store.key")).unwrap();
+            let raw = rusqlite::Connection::open(&built.store_db).unwrap();
+            raw.execute_batch(&format!("PRAGMA key = \"x'{}'\";", key.trim()))
+                .unwrap();
+            raw.execute_batch("DROP TABLE threads;").unwrap();
+        }
+
+        let bind = built.conversation.set_channel("discord:guild-9");
+        assert!(bind.is_err(), "bind must fail once threads table is gone");
+
+        // Now ephemeral: a send replays NO prior history (fail-safe, not the
+        // stale repl thread).
+        built.conversation.set_group_context(true);
+        built.conversation.send("group turn", None).await.unwrap();
+        let msgs = format!("{:?}", built.recorder.calls().last().unwrap().messages);
+        assert!(
+            !msgs.contains("private-secret-xyzzy"),
+            "failed bind must not leave the stale private thread: {}",
+            msgs
+        );
+    }
+
     /// Network queries are answered onto the public feed — the daemon must
     /// generate those responses with the group prompt, not the operator's
     /// private context.
@@ -1258,6 +1396,111 @@ triggers:
         assert!(
             !system.contains("Operator Profile"),
             "operator profile must not back network query responses"
+        );
+    }
+
+    /// §2 resume: a session's live conversation turns survive a process
+    /// restart and replay on resume. Drives two separate Conversation
+    /// instances over the same store — the second reattaches via
+    /// current_session_id (what `familiar resume` sets) and sees the history.
+    #[tokio::test]
+    async fn resume_reattaches_live_history() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+
+        // Session 1: a real turn lands in the repl thread.
+        let mut first = build_conversation(
+            &tmp,
+            "mock",
+            "first-reply",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+        first.conversation.set_channel("repl").unwrap();
+        first
+            .conversation
+            .send("remember-this-marker", None)
+            .await
+            .unwrap();
+        let session_id = {
+            let store = Store::open(&first.store_db).unwrap();
+            store.get_context("current_session_id").unwrap().unwrap()
+        };
+        drop(first); // process death
+
+        // "Resume": a fresh Conversation over the SAME store (same tmp) —
+        // current_session_id already points at the session, as the resume
+        // CLI sets it. set_channel reattaches the existing thread.
+        let mut second = build_conversation(
+            &tmp,
+            "mock",
+            "second-reply",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+        second.conversation.set_channel("repl").unwrap();
+        second.conversation.send("follow-up", None).await.unwrap();
+
+        // The replayed prompt for the follow-up must include the prior turn.
+        let transcript = format!("{:?}", second.recorder.calls().last().unwrap().messages);
+        assert!(
+            transcript.contains("remember-this-marker"),
+            "resumed session must replay prior history: {}",
+            transcript
+        );
+
+        // And it's the same session, not a fresh one.
+        let store = Store::open(&second.store_db).unwrap();
+        assert_eq!(
+            store.get_context("current_session_id").unwrap().unwrap(),
+            session_id,
+            "resume must not start a new session"
+        );
+    }
+
+    /// §2 fork: forking the active session clones its thread history into a
+    /// new session that the conversation can then continue independently.
+    #[tokio::test]
+    async fn fork_clones_live_session() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let mut built = build_conversation(
+            &tmp,
+            "mock",
+            "reply",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+        built.conversation.set_channel("repl").unwrap();
+        built
+            .conversation
+            .send("original-turn-marker", None)
+            .await
+            .unwrap();
+
+        // Fork the current session (this is what REPL /fork calls).
+        let forked = built
+            .conversation
+            .fork_session(i64::MAX, "forked-branch")
+            .unwrap();
+        assert!(forked.is_some(), "fork must return a new session id");
+
+        // The forked session carries the original turn in its repl thread.
+        let store = Store::open(&built.store_db).unwrap();
+        let ftid = store
+            .resolve_thread(forked.as_ref().unwrap(), "repl", None)
+            .unwrap();
+        let turns = store.thread_recent_turns(&ftid, 50).unwrap();
+        assert!(
+            turns
+                .iter()
+                .any(|(_, c, _)| c.contains("original-turn-marker")),
+            "forked session must carry the original history"
         );
     }
 }

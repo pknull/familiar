@@ -126,6 +126,18 @@ pub async fn run_session(
         // this must be set every turn, not once.
         conversation.set_group_context(msg.group);
 
+        // Bind to this channel's own thread so each channel (REPL, TUI, a
+        // specific Discord channel) keeps an isolated history. On failure the
+        // bind leaves the conversation ephemeral (thread cleared); skip the
+        // turn rather than answer from a wrong/empty context.
+        if let Err(e) = conversation.set_channel(&msg.channel_id) {
+            tracing::warn!(error = %e, channel = %msg.channel_id, "failed to bind channel thread");
+            let _ = channel
+                .respond_error("Could not open this channel's history. Try again.")
+                .await;
+            continue;
+        }
+
         match conversation.send(input, stream_cb).await {
             Ok((response_text, _usage)) => {
                 // Hand the canonical full response to the channel. Each

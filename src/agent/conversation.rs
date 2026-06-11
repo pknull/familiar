@@ -6,6 +6,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chrono::Local;
+
 use crate::channel::TextCallback;
 use crate::config::{AgentConfig, ToolTrustConfig, TrustLevel};
 use crate::egregore::EgregoreClient;
@@ -40,6 +42,14 @@ pub struct ConversationUsage {
     pub estimated_usd: f64,
 }
 
+/// Resolved persistence target for the current channel: which session and
+/// which thread within it the conversation reads history from and writes to.
+#[derive(Debug, Clone)]
+struct ThreadCtx {
+    session_id: String,
+    thread_id: String,
+}
+
 /// Conversation engine — manages the dialogue loop.
 pub struct Conversation {
     provider: Box<dyn Provider>,
@@ -54,6 +64,10 @@ pub struct Conversation {
     completion_cache: Option<CompletionCache>,
     /// Whether this conversation is in a group channel (Discord guild, etc.)
     group_context: bool,
+    /// Active persistence target. `Some` for interactive channels (per-channel
+    /// thread history); `None` for ephemeral surfaces like daemon feed queries,
+    /// which neither persist nor replay history.
+    thread: Option<ThreadCtx>,
     /// Psychographic profile for operator personalization.
     profile: Profile,
     /// Path to profile JSON file on disk.
@@ -89,9 +103,45 @@ impl Conversation {
             hooks: HookRunner::new(),
             completion_cache: None,
             group_context: false,
+            thread: None,
             profile,
             profile_path,
         }
+    }
+
+    /// Bind the conversation to a channel's thread for this turn. Resolves
+    /// (creating if needed) the active session and the per-channel thread, so
+    /// each channel (REPL, TUI, a specific Discord channel) keeps its own
+    /// history. Channels with separate `channel_id`s never replay into one
+    /// another — this is the isolation boundary between private and group
+    /// conversations. Call per-turn before `send`.
+    pub fn set_channel(&mut self, channel_id: &str) -> Result<()> {
+        // Clear FIRST so a failed bind can never leave the previous turn's
+        // thread in place: the privacy boundary must fail safe (ephemeral),
+        // never fail open (stale thread replaying another channel's history).
+        self.thread = None;
+        let session_id = self.ensure_session()?;
+        let thread_id = self.store.resolve_thread(&session_id, channel_id, None)?;
+        self.thread = Some(ThreadCtx {
+            session_id,
+            thread_id,
+        });
+        Ok(())
+    }
+
+    /// Return the active session id, creating a fresh session (and recording
+    /// it as `current_session_id`) if none is set or the recorded one was
+    /// pruned. `resume` sets `current_session_id` to reattach an old session.
+    fn ensure_session(&self) -> Result<String> {
+        if let Some(sid) = self.store.get_context("current_session_id")? {
+            if self.store.session_exists(&sid)? {
+                return Ok(sid);
+            }
+        }
+        let slug = format!("session-{}", Local::now().format("%Y%m%d-%H%M%S"));
+        let sid = self.store.create_session(&slug)?;
+        self.store.set_context("current_session_id", &sid)?;
+        Ok(sid)
     }
 
     /// Set a pre-configured hook runner.
@@ -168,11 +218,15 @@ impl Conversation {
         user_input: &str,
         on_text: Option<TextCallback>,
     ) -> Result<(String, ConversationUsage)> {
-        // Compact old turns if conversation is too long
+        // Compact old turns if the thread is too long (no-op when ephemeral).
         self.compact_if_needed().await;
 
-        // Save user turn to local history
-        self.store.add_turn("user", user_input, None)?;
+        // Persist the user turn into the active thread. Ephemeral surfaces
+        // (daemon feed queries) keep no history.
+        if let Some(thread) = &self.thread {
+            self.store
+                .add_session_turn(&thread.thread_id, "user", user_input, None)?;
+        }
 
         // Extract profile signals from user input (cheap regex, no LLM cost).
         // Group messages come from other people — they must not mutate the
@@ -197,48 +251,53 @@ impl Conversation {
             }
         }
 
-        // Assemble context: recent conversation + available tools
+        // Assemble context: thread history + available tools
         let messages = self.build_messages(user_input)?;
         let tools = self.build_tools().await;
 
         // Run the tool-use loop
         let (response_text, usage) = self.run_loop(messages, &tools, on_text.as_ref()).await?;
 
-        // Save assistant response to local history
-        self.store.add_turn("assistant", &response_text, None)?;
+        // Persist the assistant response and mark the session active.
+        if let Some(thread) = &self.thread {
+            self.store
+                .add_session_turn(&thread.thread_id, "assistant", &response_text, None)?;
+            self.store.touch_session(&thread.session_id)?;
+        }
 
         Ok((response_text, usage))
     }
 
     /// Build the message history for the LLM.
+    ///
+    /// Ephemeral conversations (no bound thread) send only the current input —
+    /// daemon feed queries must not draw on any stored history. Channel-bound
+    /// conversations replay that channel's thread, which by construction holds
+    /// only that channel's turns: a Discord guild thread can never replay the
+    /// operator's private REPL/DM history, and vice versa.
     fn build_messages(&self, current_input: &str) -> Result<Vec<Message>> {
-        // Group turns get NO history replay: the store holds the operator's
-        // private DM/REPL turns, which must not back guild replies or
-        // feed-published query responses.
-        if self.group_context {
-            return Ok(vec![Message::user(current_input)]);
-        }
+        let thread = match &self.thread {
+            Some(t) => t,
+            None => return Ok(vec![Message::user(current_input)]),
+        };
 
-        let recent = self.store.recent_turns(20)?;
+        // The current user turn was already persisted into the thread, so it
+        // is the final entry here — replay as-is without re-appending.
+        let recent = self.store.thread_turns(&thread.thread_id, 20)?;
         let mut messages = Vec::new();
-
-        // Add recent conversation history (excluding the current turn we just saved)
         for turn in &recent {
-            if turn.content == current_input && turn.role == "user" {
-                // Skip the current turn — we'll add it fresh
-                continue;
-            }
             match turn.role.as_str() {
                 "user" => messages.push(Message::user(&turn.content)),
                 "assistant" => {
                     messages.push(Message::assistant(vec![ContentBlock::text(&turn.content)]));
                 }
+                "system" => messages.push(Message::user(&turn.content)),
                 _ => {}
             }
         }
-
-        // Add current user message
-        messages.push(Message::user(current_input));
+        if messages.is_empty() {
+            messages.push(Message::user(current_input));
+        }
 
         Ok(messages)
     }
@@ -580,15 +639,21 @@ impl Conversation {
         Ok((response_text, total_usage))
     }
 
-    /// Compact conversation history when estimated token usage exceeds budget.
+    /// Compact thread history when estimated token usage exceeds budget.
     ///
     /// Uses token estimation (len/4) to decide when to compact. Preserves the
     /// most recent N turns and summarizes everything else into a structured
     /// system turn. On re-compaction, merges with the existing summary.
+    /// No-op for ephemeral conversations (nothing is persisted to compact).
     async fn compact_if_needed(&self) {
         use crate::agent::compaction;
 
-        let all_turns = match self.store.recent_turns(10_000) {
+        let thread = match &self.thread {
+            Some(t) => t,
+            None => return,
+        };
+
+        let all_turns = match self.store.thread_turns(&thread.thread_id, 10_000) {
             Ok(turns) => turns,
             Err(e) => {
                 tracing::warn!("failed to fetch turns for compaction check: {}", e);
@@ -658,16 +723,23 @@ impl Conversation {
             }
         };
 
-        // Save summary as a system turn
+        // Save summary as a system turn in this thread. Written before the
+        // delete so its higher id keeps it clear of the cutoff.
         let summary_with_prefix = format!("[Compacted Context]\n{}", summary);
-        if let Err(e) = self.store.add_turn("system", &summary_with_prefix, None) {
+        if let Err(e) =
+            self.store
+                .add_session_turn(&thread.thread_id, "system", &summary_with_prefix, None)
+        {
             tracing::warn!("failed to save compaction summary: {}", e);
             return;
         }
 
-        // Delete the compacted turns
+        // Delete the compacted turns (thread-scoped).
         let cutoff_id = to_compact.last().unwrap().id + 1;
-        if let Err(e) = self.store.delete_turns_before(cutoff_id) {
+        if let Err(e) = self
+            .store
+            .delete_thread_turns_before(&thread.thread_id, cutoff_id)
+        {
             tracing::warn!("failed to delete old turns during compaction: {}", e);
         } else {
             tracing::info!(deleted = compact_count, "compaction complete");

@@ -7,6 +7,7 @@
 use rusqlite::params;
 
 use crate::error::Result;
+use crate::store::conversations::Turn;
 use crate::store::Store;
 
 /// Session metadata.
@@ -142,6 +143,48 @@ impl Store {
         Ok(turns.into_iter().rev().collect())
     }
 
+    /// Get the most recent `limit` turns for a thread as [`Turn`] rows
+    /// (id/role/content), oldest-first. Used by the conversation loop for
+    /// history replay; ids let compaction find the delete cutoff.
+    pub fn thread_turns(&self, thread_id: &str, limit: usize) -> Result<Vec<Turn>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id, role, content FROM conversations WHERE thread_id = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+
+        let mut turns: Vec<Turn> = stmt
+            .query_map(params![thread_id, limit as i64], |row| {
+                Ok(Turn {
+                    id: row.get(0)?,
+                    role: row.get(1)?,
+                    content: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        turns.reverse();
+        Ok(turns)
+    }
+
+    /// Delete turns in a thread with id strictly less than `cutoff_id`.
+    /// Thread-scoped counterpart to `delete_turns_before` for compaction.
+    pub fn delete_thread_turns_before(&self, thread_id: &str, cutoff_id: i64) -> Result<()> {
+        self.conn().execute(
+            "DELETE FROM conversations WHERE thread_id = ?1 AND id < ?2",
+            params![thread_id, cutoff_id],
+        )?;
+        Ok(())
+    }
+
+    /// Whether a session with this id still exists (it may have been pruned).
+    pub fn session_exists(&self, session_id: &str) -> Result<bool> {
+        let n: i64 = self.conn().query_row(
+            "SELECT COUNT(*) FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     /// Fork a session: clone all turns up to a given message ID into a new session.
     pub fn fork_session(
         &self,
@@ -187,12 +230,22 @@ impl Store {
 
     /// Delete sessions idle longer than the given duration.
     pub fn prune_idle_sessions(&self, max_idle_secs: i64) -> Result<usize> {
+        // Deleting sessions cascades to their threads (threads.session_id has
+        // ON DELETE CASCADE, enforced now that foreign_keys is ON).
         let deleted = self.conn().execute(
             "DELETE FROM sessions WHERE id IN (
                 SELECT id FROM sessions
                 WHERE julianday('now') - julianday(updated_at) > ?1 / 86400.0
             )",
             params![max_idle_secs],
+        )?;
+        // conversations.thread_id was added via ALTER TABLE and carries no FK,
+        // so its rows don't cascade — sweep any now-orphaned turns.
+        self.conn().execute(
+            "DELETE FROM conversations
+             WHERE thread_id IS NOT NULL
+               AND thread_id NOT IN (SELECT id FROM threads)",
+            [],
         )?;
         Ok(deleted)
     }

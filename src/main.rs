@@ -308,20 +308,16 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             };
 
-            // Load session history into conversation store.
+            // Reattach the conversation to this session. set_channel (called
+            // per-turn in run_session) resolves the existing per-channel thread
+            // and replays its history natively — no copying required.
             let resume_thread = resume_store.resolve_thread(&session_id, "repl", None)?;
-            let turns = resume_store.thread_recent_turns(&resume_thread, 100)?;
-            let store_path = PathBuf::from(Config::expand_path(&config.store.path));
-            let active_store = Store::open(&store_path)?;
-            for (role, content, tool_calls) in &turns {
-                active_store.add_turn(role, content, tool_calls.as_deref())?;
-            }
+            let turn_count = resume_store
+                .thread_recent_turns(&resume_thread, 1000)?
+                .len();
+            resume_store.set_context("current_session_id", &session_id)?;
             resume_store.touch_session(&session_id)?;
-            println!(
-                "Resumed session: {} ({} turns loaded)",
-                session_id,
-                turns.len()
-            );
+            println!("Resumed session: {} ({} turns)", session_id, turn_count);
 
             let channel = channel::repl::ReplChannel::new(config.repl.clone())?;
             cli::repl::run_session(Box::new(channel), &mut conversation, &config.repl).await?;
