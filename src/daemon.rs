@@ -299,7 +299,7 @@ impl Daemon {
     }
 
     /// Parse and dispatch a single SSE message.
-    async fn handle_sse_message(&mut self, data: &str) -> Result<()> {
+    pub async fn handle_sse_message(&mut self, data: &str) -> Result<()> {
         let message: serde_json::Value = serde_json::from_str(data)?;
 
         // Evaluate SSE triggers against every message (before relevance filter)

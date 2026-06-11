@@ -99,7 +99,7 @@ impl Heartbeat {
     }
 
     /// Execute a single heartbeat tick.
-    async fn tick(&mut self) -> crate::error::Result<()> {
+    pub async fn tick(&mut self) -> crate::error::Result<()> {
         // Check quiet hours
         let now = Local::now();
         let hour = now.hour();
