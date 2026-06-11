@@ -197,6 +197,11 @@ impl EventHandler for FamiliarDiscordHandler {
             content,
             sender: msg.author.name.clone(),
             channel_id: format!("discord:{}", msg.channel_id),
+            group: is_group_message(
+                msg.guild_id.is_some(),
+                &msg.author.id.to_string(),
+                &self.config.dm_user_allowlist,
+            ),
         };
 
         let responder = DiscordResponder {
@@ -212,6 +217,15 @@ impl EventHandler for FamiliarDiscordHandler {
 }
 
 /// Split long messages to respect Discord's 2000 char limit.
+/// Decide whether a Discord message runs in group (privacy-reduced) context.
+///
+/// Guild messages are always group. DMs are only trusted with the operator's
+/// private context when the author is on the dm_user_allowlist — any Discord
+/// user can DM a bot, so an empty allowlist trusts no one.
+pub fn is_group_message(in_guild: bool, author_id: &str, dm_user_allowlist: &[String]) -> bool {
+    in_guild || !dm_user_allowlist.iter().any(|id| id == author_id)
+}
+
 fn split_message(content: &str, max_len: usize) -> Vec<String> {
     if content.len() <= max_len {
         return vec![content.to_string()];

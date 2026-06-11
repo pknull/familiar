@@ -35,8 +35,10 @@ const ORDERED_FILES: &[(&str, &str)] = &[
     ("MEMORY.md", "Long-Term Memory"),
 ];
 
-/// Files excluded from group channel contexts to prevent personal data leaking.
-const PRIVATE_FILES: &[&str] = &["MEMORY.md", "USER.md"];
+/// Files included in group channel contexts. Allowlist: everything else
+/// (USER.md, MEMORY.md, daily logs, extra .md files) carries personal data
+/// and stays private to single-operator surfaces (REPL/TUI/DM).
+const GROUP_SAFE_FILES: &[&str] = &["AGENTS.md", "SOUL.md", "IDENTITY.md", "TOOLS.md"];
 
 /// Workspace manager — reads, writes, and assembles prompt from workspace files.
 #[derive(Clone)]
@@ -84,14 +86,15 @@ impl Workspace {
 
     /// Assemble the full system prompt from workspace files.
     ///
-    /// If `group_context` is true, private files (MEMORY.md, USER.md) are excluded
-    /// to prevent personal data leaking into group channels.
+    /// If `group_context` is true, only the GROUP_SAFE_FILES allowlist is
+    /// included — USER.md, MEMORY.md, daily logs, and extra files all carry
+    /// personal data and must not leak into shared channels.
     pub fn assemble_prompt(&self, group_context: bool) -> String {
         let mut sections = Vec::new();
 
         // Load ordered files
         for (filename, label) in ORDERED_FILES {
-            if group_context && PRIVATE_FILES.contains(filename) {
+            if group_context && !GROUP_SAFE_FILES.contains(filename) {
                 continue;
             }
             if let Some(content) = self.read_file(filename) {
@@ -99,6 +102,12 @@ impl Workspace {
                     sections.push(format!("## {}\n\n{}", label, content.trim()));
                 }
             }
+        }
+
+        // Daily logs and user-added extra files are personal context;
+        // group prompts end at the allowlisted core files.
+        if group_context {
+            return sections.join("\n\n---\n\n");
         }
 
         // Load daily logs (today + yesterday)

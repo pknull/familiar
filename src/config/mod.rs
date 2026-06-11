@@ -327,6 +327,13 @@ pub struct DiscordConfig {
     #[serde(default)]
     pub guild_allowlist: Vec<String>,
 
+    /// Discord user IDs whose DMs are trusted with the operator's private
+    /// context (MEMORY/USER/profile/personal tools). Any Discord user can DM
+    /// a bot, so DMs from users NOT on this list run in group context.
+    /// Empty (the default) means NO DM is trusted — add your own user ID.
+    #[serde(default)]
+    pub dm_user_allowlist: Vec<String>,
+
     /// Require @mention to respond.
     #[serde(default = "default_true")]
     pub require_mention: bool,

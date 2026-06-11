@@ -256,8 +256,10 @@ impl Heartbeat {
 }
 
 /// Check whether `hour` falls within the quiet range [start, end).
-/// Handles overnight wrapping (e.g. 22:00 to 08:00).
-fn is_quiet_hour(quiet_start: u32, quiet_end: u32, hour: u32) -> bool {
+/// Handles overnight wrapping (e.g. 22:00 to 08:00). Shared by the
+/// heartbeat loop and the daemon's SSE-trigger dispatch — quiet hours
+/// gate ALL proactive output through this one predicate.
+pub fn is_quiet_hour(quiet_start: u32, quiet_end: u32, hour: u32) -> bool {
     if quiet_start <= quiet_end {
         // e.g. quiet_start=8, quiet_end=17 — quiet during daytime
         hour >= quiet_start && hour < quiet_end

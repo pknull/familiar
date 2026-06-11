@@ -61,6 +61,7 @@ impl Channel for TuiChannel {
             content: input,
             sender: "user".to_string(),
             channel_id: "tui".to_string(),
+            group: false,
         })
     }
 

@@ -33,6 +33,10 @@ pub struct ChannelMessage {
     pub sender: String,
     /// Channel-specific identifier (e.g., "repl", "discord:guild:channel").
     pub channel_id: String,
+    /// Whether this message arrived in a shared/multi-user space (Discord
+    /// guild channel). Group messages get a privacy-reduced system prompt:
+    /// no MEMORY.md, USER.md, daily logs, extra files, or operator profile.
+    pub group: bool,
 }
 
 /// A network task presented to the operator for accept/reject.

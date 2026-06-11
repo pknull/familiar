@@ -19,6 +19,16 @@ use thallus_core::provider::{
     cache::CompletionCache, pricing, ContentBlock, Message, Provider, StopReason, StreamEvent,
 };
 
+/// Tools that read or write the operator's personal data. Never advertised
+/// to nor executable by the model in group (multi-user) contexts.
+const GROUP_BLOCKED_TOOLS: &[&str] = &[
+    "local_remember",
+    "local_recall",
+    "workspace_read",
+    "workspace_write",
+    "workspace_list",
+];
+
 /// Accumulated token usage across a conversation turn (may span multiple LLM calls).
 #[derive(Debug, Clone, Default)]
 pub struct ConversationUsage {
@@ -164,8 +174,14 @@ impl Conversation {
         // Save user turn to local history
         self.store.add_turn("user", user_input, None)?;
 
-        // Extract profile signals from user input (cheap regex, no LLM cost)
-        let signals = profile::extract::extract_signals(user_input);
+        // Extract profile signals from user input (cheap regex, no LLM cost).
+        // Group messages come from other people — they must not mutate the
+        // operator's profile.
+        let signals = if self.group_context {
+            Vec::new()
+        } else {
+            profile::extract::extract_signals(user_input)
+        };
         if !signals.is_empty() {
             for signal in &signals {
                 self.profile.set_field(
@@ -196,6 +212,13 @@ impl Conversation {
 
     /// Build the message history for the LLM.
     fn build_messages(&self, current_input: &str) -> Result<Vec<Message>> {
+        // Group turns get NO history replay: the store holds the operator's
+        // private DM/REPL turns, which must not back guild replies or
+        // feed-published query responses.
+        if self.group_context {
+            return Ok(vec![Message::user(current_input)]);
+        }
+
         let recent = self.store.recent_turns(20)?;
         let mut messages = Vec::new();
 
@@ -355,6 +378,12 @@ impl Conversation {
                 "properties": {}
             }),
         });
+
+        // Group channels never see personal-data tools — removing them from
+        // the advertised set; execute_tool enforces the same boundary.
+        if self.group_context {
+            tools.retain(|t| !GROUP_BLOCKED_TOOLS.contains(&t.name.as_str()));
+        }
 
         tools
     }
@@ -685,6 +714,13 @@ impl Conversation {
         if !self.is_tool_allowed(name) {
             return Err(FamiliarError::Internal {
                 reason: format!("Tool '{}' is not in the allowed_tools scope", name),
+            });
+        }
+        // Hard privacy boundary: personal-data tools never execute in group
+        // context, even if the model requests one that build_tools omitted.
+        if self.group_context && GROUP_BLOCKED_TOOLS.contains(&name) {
+            return Err(FamiliarError::Internal {
+                reason: format!("Tool '{}' is not available in group channels", name),
             });
         }
 

@@ -108,6 +108,7 @@ impl Channel for ReplChannel {
                         content: input,
                         sender: "user".to_string(),
                         channel_id: "repl".to_string(),
+                        group: false,
                     });
                 }
                 Err(ReadlineError::Interrupted) => {

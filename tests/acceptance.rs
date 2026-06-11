@@ -178,12 +178,11 @@ fn injected_daily_log_excluded_from_prompt() {
     );
 }
 
-/// KNOWN GAP (§1/§4 `[~]`): no channel ever calls set_group_context(true), and
-/// daily logs / extra .md files bypass the group exclusion entirely.
-/// Promote the group-isolation items to [x] only when (a) the Discord channel
-/// sets group context for guild messages and (b) this test passes unignored.
+/// §4 group isolation (allowlist model): daily logs and user-added extra
+/// .md files are excluded in group contexts. Enforcement point: every
+/// channel message carries `group` (Discord: guild_id.is_some()), applied
+/// per-turn in run_session via set_group_context.
 #[test]
-#[ignore = "gap: group exclusion never activates in production; daily logs + extras leak"]
 fn group_context_excludes_daily_logs_and_extras() {
     let tmp = TempDir::new().unwrap();
     let ws = workspace_in(&tmp);
@@ -386,16 +385,8 @@ triggers:
     assert!(!sse[0].matches_event(&[("content_type", "insight")]));
 }
 
-/// KNOWN GAP (§3 `[~]`): quiet hours gate heartbeat output only; the SSE
-/// trigger path (daemon::evaluate_sse_triggers) performs no quiet-hours
-/// check. There is no public seam to integration-test the daemon dispatch;
-/// promote the quiet-hours item to [x] when dispatch is centralized and a
-/// real test replaces this placeholder.
-#[test]
-#[ignore = "gap: SSE-driven triggers bypass quiet hours; no testable dispatch seam"]
-fn quiet_hours_suppress_sse_triggers() {
-    panic!("requires quiet-hours enforcement at a single trigger-dispatch chokepoint");
-}
+// §3 quiet hours on SSE triggers: tested through the live daemon message
+// path in harness::daemon_sse_triggers_respect_quiet_hours below.
 
 // ---------------------------------------------------------------------------
 // §4 Security Architecture
@@ -474,6 +465,12 @@ mod harness {
 
     static HARNESS_LOCK: Mutex<()> = Mutex::new(());
     static TEST_HOME: OnceLock<PathBuf> = OnceLock::new();
+
+    /// Serialize $HOME-dependent tests. Poison-tolerant: a failing test
+    /// must not cascade into PoisonError failures in every later test.
+    fn lock_harness() -> std::sync::MutexGuard<'static, ()> {
+        HARNESS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// One shared fake $HOME for the whole test binary; set before any
     /// harness object resolves `~`. Tests serialize and wipe ~/.familiar.
@@ -567,7 +564,7 @@ mod harness {
     /// §3 wiring: send() runs extract_signals and persists the profile.
     #[tokio::test]
     async fn conversation_extracts_signals_and_writes_profile() {
-        let _g = HARNESS_LOCK.lock().unwrap();
+        let _g = lock_harness();
         let home = reset_home();
         let tmp = TempDir::new().unwrap();
         let mut built = build_conversation(
@@ -598,7 +595,7 @@ mod harness {
     /// prompt sent to the provider, and withheld in group context.
     #[tokio::test]
     async fn conversation_injects_tier_prompt_and_gates_in_group() {
-        let _g = HARNESS_LOCK.lock().unwrap();
+        let _g = lock_harness();
         let home = reset_home();
 
         // Pre-write a high-confidence profile where Conversation loads it.
@@ -644,7 +641,7 @@ mod harness {
     /// exceeded — old turns are replaced by a [Compacted Context] summary.
     #[tokio::test]
     async fn conversation_compacts_when_over_budget() {
-        let _g = HARNESS_LOCK.lock().unwrap();
+        let _g = lock_harness();
         reset_home();
         let tmp = TempDir::new().unwrap();
         let config = AgentConfig {
@@ -693,7 +690,7 @@ mod harness {
     /// at the same boundary.
     #[tokio::test]
     async fn conversation_dispatches_workspace_tool() {
-        let _g = HARNESS_LOCK.lock().unwrap();
+        let _g = lock_harness();
         reset_home();
         let tmp = TempDir::new().unwrap();
         let mut built = build_conversation(
@@ -719,7 +716,7 @@ mod harness {
     /// rejected; the loop survives and the file is never created.
     #[tokio::test]
     async fn workspace_tool_rejects_injection_via_loop() {
-        let _g = HARNESS_LOCK.lock().unwrap();
+        let _g = lock_harness();
         reset_home();
         let tmp = TempDir::new().unwrap();
         let mut built = build_conversation(
@@ -745,7 +742,7 @@ mod harness {
     /// the live loop and inspects the tool result fed back to the provider.
     #[tokio::test]
     async fn mcp_tool_disclaimer_applied_by_trust_tier() {
-        let _g = HARNESS_LOCK.lock().unwrap();
+        let _g = lock_harness();
         reset_home();
         let fixture = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -812,7 +809,7 @@ mod harness {
     /// daily log; an "OK" response is a no-op (HEARTBEAT_OK signal).
     #[tokio::test]
     async fn heartbeat_tick_appends_finding_and_ok_is_noop() {
-        let _g = HARNESS_LOCK.lock().unwrap();
+        let _g = lock_harness();
         let home = reset_home();
         let workspace_dir = home.join(".familiar/workspace");
         let workspace = Workspace::new(workspace_dir).unwrap();
@@ -865,7 +862,7 @@ mod harness {
     /// daily log).
     #[tokio::test]
     async fn daemon_sse_trigger_fires_through_message_path() {
-        let _g = HARNESS_LOCK.lock().unwrap();
+        let _g = lock_harness();
         let home = reset_home();
         let workspace_dir = home.join(".familiar/workspace");
         let workspace = Workspace::new(workspace_dir.clone()).unwrap();
@@ -903,6 +900,7 @@ triggers:
             DaemonConfig::default(),
             AgentConfig::default(),
             workspace.clone(),
+            (0, 0), // never quiet
         );
 
         let message = serde_json::json!({
@@ -919,6 +917,347 @@ triggers:
         assert!(
             prompt.contains("trigger:notify"),
             "matching SSE message must fire the trigger through the live path"
+        );
+    }
+
+    /// §3 AC: quiet hours suppress ALL proactive output — a matching SSE
+    /// message during quiet hours must NOT fire the trigger action, through
+    /// the same live daemon message path as the firing test above.
+    #[tokio::test]
+    async fn daemon_sse_triggers_respect_quiet_hours() {
+        let _g = lock_harness();
+        let home = reset_home();
+        let workspace_dir = home.join(".familiar/workspace");
+        let workspace = Workspace::new(workspace_dir.clone()).unwrap();
+        std::fs::write(
+            workspace_dir.join("HEARTBEAT.md"),
+            r#"---
+triggers:
+  - match: "content_type=task_result AND status=failed"
+    action: notify
+    on: sse
+---
+
+- checklist body
+"#,
+        )
+        .unwrap();
+
+        let tmp = TempDir::new().unwrap();
+        let built = build_conversation(
+            &tmp,
+            "mock",
+            "ok",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+        let mut daemon = Daemon::new(
+            built.conversation,
+            EgregoreClient::new("http://127.0.0.1:1", None),
+            "http://127.0.0.1:1".into(),
+            "@test-identity".into(),
+            built.store_db.to_string_lossy().into_owned(),
+            DaemonConfig::default(),
+            AgentConfig::default(),
+            workspace.clone(),
+            (0, 24), // always quiet — covers whatever hour the test runs at
+        );
+
+        let message = serde_json::json!({
+            "author": "@some-servitor",
+            "hash": "abc123",
+            "content": {"type": "task_result", "status": "failed", "task_id": "t-1"}
+        });
+        daemon
+            .handle_sse_message(&message.to_string())
+            .await
+            .unwrap();
+
+        let prompt = workspace.assemble_prompt(false);
+        assert!(
+            !prompt.contains("trigger:notify"),
+            "quiet hours must suppress SSE-trigger actions"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Group privacy boundary — the bypass routes found in review: commands,
+    // tool execution, DM trust, profile mutation, and the daemon query path.
+    // -----------------------------------------------------------------------
+
+    /// Scripted channel: feeds queued messages through run_session and
+    /// records every response, so channel-driver behavior is testable
+    /// without Discord.
+    struct TestChannel {
+        queue: std::collections::VecDeque<familiar::channel::ChannelMessage>,
+        responses: std::sync::Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl familiar::channel::Channel for TestChannel {
+        fn name(&self) -> &str {
+            "test"
+        }
+        async fn next(&mut self) -> Option<familiar::channel::ChannelMessage> {
+            self.queue.pop_front()
+        }
+        async fn respond(&self, text: &str) -> familiar::error::Result<()> {
+            self.responses.lock().unwrap().push(text.to_string());
+            Ok(())
+        }
+        async fn respond_error(&self, text: &str) -> familiar::error::Result<()> {
+            self.responses.lock().unwrap().push(format!("ERR:{}", text));
+            Ok(())
+        }
+        async fn stream_chunk(&self, _chunk: &str) -> familiar::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn group_msg(content: &str) -> familiar::channel::ChannelMessage {
+        familiar::channel::ChannelMessage {
+            content: content.into(),
+            sender: "stranger".into(),
+            channel_id: "discord:guild-chan".into(),
+            group: true,
+        }
+    }
+
+    /// DM trust: guilds are always group; DMs are group unless the author
+    /// is on the dm_user_allowlist; empty allowlist trusts no one.
+    #[test]
+    fn dm_trust_requires_allowlist() {
+        use familiar::channel::discord::is_group_message;
+        let allow = vec!["111".to_string()];
+
+        assert!(is_group_message(true, "111", &allow), "guild always group");
+        assert!(
+            !is_group_message(false, "111", &allow),
+            "allowlisted DM trusted"
+        );
+        assert!(
+            is_group_message(false, "222", &allow),
+            "stranger DM untrusted"
+        );
+        assert!(
+            is_group_message(false, "111", &[]),
+            "empty allowlist trusts no DMs"
+        );
+    }
+
+    /// Group messages can't run session commands (/context would dump the
+    /// private context store; /quit would kill the session), and the model
+    /// is not offered personal-data tools.
+    #[tokio::test]
+    async fn run_session_blocks_commands_and_private_tools_in_group() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let mut built = build_conversation(
+            &tmp,
+            "mock",
+            "ok",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+        {
+            let store = Store::open(&built.store_db).unwrap();
+            store
+                .set_context("private_key_x", "private_value_y")
+                .unwrap();
+            // Prior private conversation turns must not replay into group
+            // turns (history isolation, not just prompt isolation).
+            store
+                .add_turn("user", "private-history-marker", None)
+                .unwrap();
+            store
+                .add_turn("assistant", "private-reply-marker", None)
+                .unwrap();
+        }
+        let ws = Workspace::new(&built.workspace_dir).unwrap();
+        ws.write_file("MEMORY.md", "secret-memory-marker").unwrap();
+
+        let responses = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let channel = TestChannel {
+            queue: [group_msg("/context"), group_msg("hello there")].into(),
+            responses: responses.clone(),
+        };
+        familiar::cli::repl::run_session(
+            Box::new(channel),
+            &mut built.conversation,
+            &familiar::config::ReplConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        let responses = responses.lock().unwrap().clone();
+        assert!(
+            responses[0].contains("not available in group channels"),
+            "commands must be refused in group: {:?}",
+            responses
+        );
+        assert!(
+            !responses.iter().any(|r| r.contains("private_value_y")),
+            "context store must never reach a group channel"
+        );
+
+        let last = built.recorder.calls().last().unwrap().clone();
+        assert!(!last.system.contains("secret-memory-marker"));
+        let transcript = format!("{:?}", last.messages);
+        assert!(
+            !transcript.contains("private-history-marker")
+                && !transcript.contains("private-reply-marker"),
+            "private conversation history must not replay into group turns"
+        );
+        for blocked in [
+            "local_recall",
+            "local_remember",
+            "workspace_read",
+            "workspace_write",
+            "workspace_list",
+        ] {
+            assert!(
+                !last.tool_names.iter().any(|t| t == blocked),
+                "{} must not be offered in group context",
+                blocked
+            );
+        }
+    }
+
+    /// Even if the model requests a personal-data tool in group context
+    /// (build_tools omission is advisory), execution is refused and the
+    /// private content never enters the transcript.
+    #[tokio::test]
+    async fn group_tool_call_refused_at_execution() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let mut built = build_conversation(
+            &tmp,
+            r#"workspace_read:{"file":"MEMORY.md"}"#,
+            "done",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+        let ws = Workspace::new(&built.workspace_dir).unwrap();
+        ws.write_file("MEMORY.md", "secret-memory-marker").unwrap();
+
+        built.conversation.set_group_context(true);
+        built
+            .conversation
+            .send("read your memory", None)
+            .await
+            .unwrap();
+
+        let transcript = format!("{:?}", built.recorder.calls().last().unwrap().messages);
+        assert!(
+            !transcript.contains("secret-memory-marker"),
+            "private file content must not reach the group transcript"
+        );
+        assert!(
+            transcript.contains("not available in group channels"),
+            "tool refusal must be the result the model sees"
+        );
+    }
+
+    /// Group messages (other people talking) must not mutate the operator's
+    /// psychographic profile.
+    #[tokio::test]
+    async fn group_messages_do_not_mutate_profile() {
+        let _g = lock_harness();
+        let home = reset_home();
+        let tmp = TempDir::new().unwrap();
+        let mut built = build_conversation(
+            &tmp,
+            "mock",
+            "ok",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+
+        built.conversation.set_group_context(true);
+        built
+            .conversation
+            .send("I'm a software engineer at a robotics startup.", None)
+            .await
+            .unwrap();
+
+        assert!(
+            !home.join(".familiar/profile.json").exists(),
+            "a stranger's message must not write the operator profile"
+        );
+    }
+
+    /// Network queries are answered onto the public feed — the daemon must
+    /// generate those responses with the group prompt, not the operator's
+    /// private context.
+    #[tokio::test]
+    async fn daemon_answers_network_queries_with_group_prompt() {
+        let _g = lock_harness();
+        let home = reset_home();
+
+        // Private context that must NOT appear in the query-answering prompt.
+        let mut profile = Profile::default();
+        profile.set_field("communication_style", "terse".into(), 0.9, "test");
+        profile.set_field("profession", "engineer".into(), 0.9, "test");
+        profile.save(&home.join(".familiar/profile.json")).unwrap();
+
+        let workspace_dir = home.join(".familiar/workspace");
+        let workspace = Workspace::new(workspace_dir).unwrap();
+
+        let tmp = TempDir::new().unwrap();
+        let built = build_conversation(
+            &tmp,
+            "mock",
+            "the answer",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+        // The marker goes in the CONVERSATION's workspace — that's what
+        // backs the system prompt the daemon's query path uses.
+        let conv_ws = Workspace::new(&built.workspace_dir).unwrap();
+        conv_ws
+            .write_file("MEMORY.md", "secret-memory-marker")
+            .unwrap();
+        let recorder = built.recorder.clone();
+        let mut daemon = Daemon::new(
+            built.conversation,
+            EgregoreClient::new("http://127.0.0.1:1", None),
+            "http://127.0.0.1:1".into(),
+            "@test-identity".into(),
+            built.store_db.to_string_lossy().into_owned(),
+            DaemonConfig::default(),
+            AgentConfig::default(),
+            workspace,
+            (0, 0),
+        );
+
+        let query = serde_json::json!({
+            "author": "@curious-peer",
+            "hash": "query-hash-1",
+            "content": {
+                "type": "query",
+                "body": "what is thallus?",
+                "recipients": ["@test-identity"]
+            }
+        });
+        daemon.handle_sse_message(&query.to_string()).await.unwrap();
+
+        let calls = recorder.calls();
+        assert!(!calls.is_empty(), "query must reach the conversation");
+        let system = &calls.last().unwrap().system;
+        assert!(
+            !system.contains("secret-memory-marker"),
+            "MEMORY.md must not back network query responses"
+        );
+        assert!(
+            !system.contains("Operator Profile"),
+            "operator profile must not back network query responses"
         );
     }
 }

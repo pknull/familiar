@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+use chrono::Timelike;
 use futures::StreamExt;
 use reqwest_eventsource::{Event, EventSource};
 use tokio::time::sleep;
@@ -157,6 +158,9 @@ pub struct Daemon {
     environment_snapshots: HashMap<String, ObservedEnvironmentSnapshot>,
     /// SSE-driven triggers loaded from HEARTBEAT.md.
     sse_triggers: Vec<Trigger>,
+    /// Quiet hours (start, end) — gates SSE-trigger actions like all other
+    /// proactive output (shared semantics with heartbeat::is_quiet_hour).
+    quiet_hours: (u32, u32),
 }
 
 impl Daemon {
@@ -170,6 +174,7 @@ impl Daemon {
         scope: crate::config::DaemonConfig,
         agent_config: crate::config::AgentConfig,
         workspace: crate::workspace::Workspace,
+        quiet_hours: (u32, u32),
     ) -> Self {
         // Load HEARTBEAT.md triggers for SSE-driven proactive behavior
         let workspace_dir = crate::config::Config::expand_path("~/.familiar/workspace");
@@ -207,6 +212,7 @@ impl Daemon {
             servitor_manifests: HashMap::new(),
             environment_snapshots: HashMap::new(),
             sse_triggers,
+            quiet_hours,
         }
     }
 
@@ -905,6 +911,13 @@ impl Daemon {
 
         tracing::info!(author, hash, "responding to query");
 
+        // Network queries are answered onto the public feed — generate the
+        // response with the privacy-reduced group prompt, never with the
+        // operator's MEMORY/USER/profile/daily-log context. Intentionally
+        // never reset: handle_query is the daemon's only conversation.send
+        // call site, and every public-facing surface must stay group.
+        self.conversation.set_group_context(true);
+
         match self.conversation.send(&prompt, None).await {
             Ok((response, _usage)) => {
                 tracing::info!(
@@ -923,6 +936,14 @@ impl Daemon {
 
     /// Evaluate SSE triggers against a feed message.
     fn evaluate_sse_triggers(&self, message: &serde_json::Value) {
+        // Trigger actions are proactive output — quiet hours apply here
+        // exactly as they do to the heartbeat.
+        let hour = chrono::Local::now().hour();
+        if crate::heartbeat::is_quiet_hour(self.quiet_hours.0, self.quiet_hours.1, hour) {
+            tracing::debug!(hour, "SSE trigger evaluation skipped (quiet hours)");
+            return;
+        }
+
         let content = match message.get("content") {
             Some(c) => c,
             None => return,

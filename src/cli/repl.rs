@@ -28,6 +28,15 @@ pub async fn run_session(
 
         // Handle commands
         if input.starts_with('/') {
+            // Session commands expose operator data (/context dumps the
+            // private context store) and control the process (/quit) —
+            // never available to group channels.
+            if msg.group {
+                let _ = channel
+                    .respond("Commands are not available in group channels.")
+                    .await;
+                continue;
+            }
             match input {
                 "/quit" | "/exit" | "/q" => {
                     // Channels (e.g. REPL) may have set a thinking
@@ -111,6 +120,11 @@ pub async fn run_session(
         // prefix; TUI: mpsc events into the TUI loop; Discord: noop, but the
         // provider still uses its streaming endpoint for latency).
         let stream_cb = channel.stream_callback();
+
+        // Per-message privacy: group messages (Discord guilds) get the
+        // reduced system prompt; the same Conversation serves DMs too, so
+        // this must be set every turn, not once.
+        conversation.set_group_context(msg.group);
 
         match conversation.send(input, stream_cb).await {
             Ok((response_text, _usage)) => {

@@ -233,6 +233,7 @@ async fn run(cli: Cli) -> Result<()> {
                 config.daemon.clone(),
                 config.agent.clone(),
                 daemon_workspace,
+                (config.heartbeat.quiet_start, config.heartbeat.quiet_end),
             );
             tracing::info!("running as daemon");
             daemon.run().await?;
