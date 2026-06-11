@@ -244,9 +244,8 @@ fn workspace_created_on_startup() {
     write_config_with_llm(&tmp);
 
     // exec will fail (no real API key) but workspace should be created before the error.
-    let _output = run(&tmp, &["exec", "test"]);
+    run(&tmp, &["exec", "test"]);
 
-    let workspace = tmp.path().join(".familiar/workspace");
     // Workspace might be at the default ~/.familiar/workspace or wherever config points.
     // Since HOME is overridden, check the default location.
     let default_workspace = tmp.path().join(".familiar/workspace");
@@ -340,8 +339,7 @@ fn exec_with_mock_persists_to_store() {
     );
 
     // Check sessions list shows activity (store was written to).
-    let output2 = run(&tmp, &["sessions"]);
-    let stdout2 = String::from_utf8_lossy(&output2.stdout);
+    run(&tmp, &["sessions"]);
     // Even without session management wired into exec, the store DB should exist.
     assert!(
         tmp.path().join(".familiar/test.db").exists(),

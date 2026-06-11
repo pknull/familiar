@@ -36,7 +36,7 @@ cargo test
 Config at `~/.familiar/familiar.toml`. Key sections:
 
 - `[egregore]` — daemon API URL
-- `[llm]` — provider (claude-code, anthropic, openai)
+- `[llm]` — provider (anthropic, openai)
 - `[mcp.*]` — local MCP servers
 - `[agent]` — max_turns, timeout, blocked_tools
 - `[store]` — SQLite path

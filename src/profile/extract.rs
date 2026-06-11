@@ -65,7 +65,7 @@ pub fn extract_signals(message: &str) -> Vec<Signal> {
 
     // Time pattern from message timestamp (structural signal)
     let hour = chrono::Local::now().hour();
-    if hour >= 22 || hour < 6 {
+    if !(6..22).contains(&hour) {
         signals.push(Signal {
             field: "time_patterns",
             value: "Night owl (active late evening/early morning)".to_string(),

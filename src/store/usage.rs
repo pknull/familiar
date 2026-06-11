@@ -7,6 +7,7 @@ use crate::store::Store;
 
 impl Store {
     /// Record token usage from an LLM call.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_usage(
         &self,
         model: &str,
@@ -39,17 +40,6 @@ impl Store {
             "SELECT COALESCE(SUM(estimated_usd), 0.0) FROM usage
              WHERE date(created_at) = date('now')",
             [],
-            |row| row.get(0),
-        )?;
-        Ok(cost)
-    }
-
-    /// Get total cost for a specific date (YYYY-MM-DD).
-    pub fn cost_for_date(&self, date: &str) -> Result<f64> {
-        let cost: f64 = self.conn().query_row(
-            "SELECT COALESCE(SUM(estimated_usd), 0.0) FROM usage
-             WHERE date(created_at) = ?1",
-            params![date],
             |row| row.get(0),
         )?;
         Ok(cost)
@@ -101,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn daily_cost_filters_by_date() {
+    fn daily_cost_counts_today() {
         let store = Store::in_memory().unwrap();
 
         store
@@ -110,9 +100,6 @@ mod tests {
 
         let today = store.daily_cost().unwrap();
         assert!(today > 0.0);
-
-        let other = store.cost_for_date("2020-01-01").unwrap();
-        assert!((other).abs() < 0.0001);
     }
 
     #[test]

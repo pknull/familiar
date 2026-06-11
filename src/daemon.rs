@@ -39,8 +39,6 @@ enum AssignmentState {
 #[derive(Debug, Clone)]
 struct PendingOffer {
     servitor: String,
-    timestamp: String,
-    ttl_seconds: u64,
     withdrawn: bool,
 }
 
@@ -56,7 +54,6 @@ struct ObservedServitorProfile {
 /// Recently observed servitor manifest used for planner-basis verification.
 #[derive(Debug, Clone)]
 struct ObservedServitorManifest {
-    hash: String,
     servitor_id: String,
     target_ids: Vec<String>,
 }
@@ -64,7 +61,6 @@ struct ObservedServitorManifest {
 /// Recently observed environment snapshot used for planner-basis verification.
 #[derive(Debug, Clone)]
 struct ObservedEnvironmentSnapshot {
-    hash: String,
     servitor_id: String,
     target_id: String,
     manifest_ref: String,
@@ -164,6 +160,7 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conversation: Conversation,
         egregore: EgregoreClient,
@@ -397,23 +394,11 @@ impl Daemon {
             None => return Ok(()),
         };
 
-        let ttl = content
-            .get("ttl_seconds")
-            .and_then(|t| t.as_u64())
-            .unwrap_or(30);
-        let timestamp = content
-            .get("timestamp")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string();
-
         // Record the offer
         self.tracker.add_offer(
             task_id,
             PendingOffer {
                 servitor: servitor.clone(),
-                timestamp: timestamp.clone(),
-                ttl_seconds: ttl,
                 withdrawn: false,
             },
         );
@@ -527,9 +512,8 @@ impl Daemon {
             .unwrap_or_default();
 
         self.servitor_manifests.insert(
-            hash.clone(),
+            hash,
             ObservedServitorManifest {
-                hash,
                 servitor_id,
                 target_ids,
             },
@@ -557,9 +541,8 @@ impl Daemon {
         };
 
         self.environment_snapshots.insert(
-            hash.clone(),
+            hash,
             ObservedEnvironmentSnapshot {
-                hash,
                 servitor_id,
                 target_id,
                 manifest_ref,

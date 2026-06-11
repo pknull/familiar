@@ -1,4 +1,4 @@
-//! Session persistence — multi-thread sessions with fork and snapshot support.
+//! Session persistence — multi-thread sessions with fork support.
 //!
 //! Each session contains one or more threads (conversations). Sessions are
 //! identified by UUID + human-readable slug. Threads are keyed by
@@ -6,7 +6,7 @@
 
 use rusqlite::params;
 
-use crate::error::{FamiliarError, Result};
+use crate::error::Result;
 use crate::store::Store;
 
 /// Session metadata.
@@ -14,19 +14,7 @@ use crate::store::Store;
 pub struct Session {
     pub id: String,
     pub slug: String,
-    pub created_at: String,
     pub updated_at: String,
-    pub active_thread_id: Option<String>,
-}
-
-/// Thread within a session.
-#[derive(Debug, Clone)]
-pub struct Thread {
-    pub id: String,
-    pub session_id: String,
-    pub channel: String,
-    pub external_id: Option<String>,
-    pub created_at: String,
 }
 
 impl Store {
@@ -40,41 +28,18 @@ impl Store {
         Ok(id)
     }
 
-    /// Get a session by ID.
-    pub fn get_session(&self, session_id: &str) -> Result<Option<Session>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT id, slug, created_at, updated_at, active_thread_id FROM sessions WHERE id = ?1",
-        )?;
-
-        let session = stmt
-            .query_row(params![session_id], |row| {
-                Ok(Session {
-                    id: row.get(0)?,
-                    slug: row.get(1)?,
-                    created_at: row.get(2)?,
-                    updated_at: row.get(3)?,
-                    active_thread_id: row.get(4)?,
-                })
-            })
-            .optional()?;
-
-        Ok(session)
-    }
-
     /// List all sessions, most recent first.
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT id, slug, created_at, updated_at, active_thread_id FROM sessions ORDER BY updated_at DESC",
-        )?;
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT id, slug, updated_at FROM sessions ORDER BY updated_at DESC")?;
 
         let sessions = stmt
             .query_map([], |row| {
                 Ok(Session {
                     id: row.get(0)?,
                     slug: row.get(1)?,
-                    created_at: row.get(2)?,
-                    updated_at: row.get(3)?,
-                    active_thread_id: row.get(4)?,
+                    updated_at: row.get(2)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -87,15 +52,6 @@ impl Store {
         self.conn().execute(
             "UPDATE sessions SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?1",
             params![session_id],
-        )?;
-        Ok(())
-    }
-
-    /// Set the active thread for a session.
-    pub fn set_active_thread(&self, session_id: &str, thread_id: &str) -> Result<()> {
-        self.conn().execute(
-            "UPDATE sessions SET active_thread_id = ?2 WHERE id = ?1",
-            params![session_id, thread_id],
         )?;
         Ok(())
     }
@@ -240,54 +196,6 @@ impl Store {
         )?;
         Ok(deleted)
     }
-
-    /// Record a file snapshot entry.
-    pub fn record_snapshot(
-        &self,
-        session_id: &str,
-        file_path: &str,
-        content_hash: &str,
-    ) -> Result<()> {
-        self.conn().execute(
-            "INSERT INTO snapshots (session_id, file_path, content_hash) VALUES (?1, ?2, ?3)",
-            params![session_id, file_path, content_hash],
-        )?;
-        Ok(())
-    }
-
-    /// Get snapshots for a session, ordered by time.
-    pub fn get_snapshots(&self, session_id: &str) -> Result<Vec<(i64, String, String, String)>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT id, file_path, content_hash, created_at FROM snapshots WHERE session_id = ?1 ORDER BY id",
-        )?;
-
-        let snaps = stmt
-            .query_map(params![session_id], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(snaps)
-    }
-
-    /// Get all snapshot content hashes referenced by any session (for orphan sweep).
-    pub fn all_snapshot_hashes(&self) -> Result<std::collections::HashSet<String>> {
-        let mut stmt = self
-            .conn()
-            .prepare("SELECT DISTINCT content_hash FROM snapshots")?;
-
-        let hashes: std::collections::HashSet<String> = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        Ok(hashes)
-    }
 }
 
 /// Generate a UUID v4 (random) using the rand crate.
@@ -390,7 +298,6 @@ mod tests {
             .unwrap();
 
         // Fork after turn 2 (the assistant reply)
-        let turns = store.thread_recent_turns(&thread_id, 10).unwrap();
         // Get the ID of the second turn — we need to query for it
         let turn_2_id: i64 = store
             .conn()

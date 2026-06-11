@@ -428,10 +428,8 @@ impl DaemonConfig {
             }
         }
         // Tag filter
-        if !self.tag_filter.is_empty() {
-            if !self.tag_filter.iter().any(|t| tags.contains(t)) {
-                return false;
-            }
+        if !self.tag_filter.is_empty() && !self.tag_filter.iter().any(|t| tags.contains(t)) {
+            return false;
         }
         true
     }

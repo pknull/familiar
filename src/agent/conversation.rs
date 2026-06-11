@@ -6,18 +6,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use thallus_core::provider::{
-    cache::CompletionCache, pricing, ContentBlock, Message, Provider, StopReason, StreamEvent,
-};
+use crate::channel::TextCallback;
 use crate::config::{AgentConfig, ToolTrustConfig, TrustLevel};
 use crate::egregore::EgregoreClient;
 use crate::error::{FamiliarError, Result};
 use crate::hooks::{HookDecision, HookRunner};
 use crate::mcp::{LlmTool, McpPool};
 use crate::profile::{self, Profile};
-use crate::channel::TextCallback;
 use crate::store::Store;
 use crate::workspace::Workspace;
+use thallus_core::provider::{
+    cache::CompletionCache, pricing, ContentBlock, Message, Provider, StopReason, StreamEvent,
+};
 
 /// Accumulated token usage across a conversation turn (may span multiple LLM calls).
 #[derive(Debug, Clone, Default)]
@@ -51,6 +51,7 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: Box<dyn Provider>,
         model_name: impl Into<String>,
@@ -594,8 +595,7 @@ impl Conversation {
         // Check if there's an existing summary (system turn from prior compaction)
         let existing_summary = to_compact
             .iter()
-            .filter(|t| t.role == "system")
-            .last()
+            .rfind(|t| t.role == "system")
             .map(|t| t.content.as_str());
 
         // Build turn pairs for compaction (exclude system summary turns)

@@ -35,14 +35,6 @@ impl Store {
         }
     }
 
-    /// Delete a context value.
-    pub fn delete_context(&self, key: &str) -> Result<bool> {
-        let rows = self
-            .conn()
-            .execute("DELETE FROM context WHERE key = ?1", params![key])?;
-        Ok(rows > 0)
-    }
-
     /// List all context keys and values.
     pub fn list_context(&self) -> Result<Vec<(String, String)>> {
         let mut stmt = self
@@ -86,16 +78,6 @@ mod tests {
         let store = Store::in_memory().unwrap();
         let value = store.get_context("nonexistent").unwrap();
         assert_eq!(value, None);
-    }
-
-    #[test]
-    fn delete_context() {
-        let store = Store::in_memory().unwrap();
-
-        store.set_context("temp", "value").unwrap();
-        assert!(store.delete_context("temp").unwrap());
-        assert!(!store.delete_context("temp").unwrap());
-        assert_eq!(store.get_context("temp").unwrap(), None);
     }
 
     #[test]

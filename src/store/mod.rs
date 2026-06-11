@@ -6,7 +6,6 @@
 pub mod context;
 pub mod conversations;
 pub mod sessions;
-pub mod snapshots;
 pub mod usage;
 
 use std::path::Path;
@@ -144,19 +143,6 @@ impl Store {
         Ok(store)
     }
 
-    /// Open an unencrypted store at a path (for testing — bypasses SQLCipher).
-    pub fn open_unencrypted(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let conn = Connection::open(path).map_err(|e| FamiliarError::Store {
-            reason: format!("failed to open database: {}", e),
-        })?;
-        let store = Self { conn };
-        store.migrate()?;
-        Ok(store)
-    }
-
     /// Run schema migrations.
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
@@ -207,17 +193,6 @@ impl Store {
 
             CREATE INDEX IF NOT EXISTS idx_threads_session
                 ON threads(session_id);
-
-            CREATE TABLE IF NOT EXISTS snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                file_path TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_snapshots_session
-                ON snapshots(session_id);
 
             CREATE TABLE IF NOT EXISTS usage (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

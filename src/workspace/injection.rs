@@ -21,8 +21,6 @@ pub fn scan(content: &str) -> Option<String> {
         .collect();
     let content = &cleaned;
 
-    let lower = content.to_lowercase();
-
     // Pattern 1: Direct instruction override attempts
     static OVERRIDE_RE: OnceLock<Regex> = OnceLock::new();
     let override_re = OVERRIDE_RE.get_or_init(|| {

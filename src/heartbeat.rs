@@ -9,12 +9,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Local, Timelike};
 use tokio::time;
 
-use thallus_core::provider::{Message, Provider};
 use crate::store::Store;
 use crate::workspace::heartbeat::{self as heartbeat_config, Trigger};
+use thallus_core::provider::{Message, Provider};
 
 const SYSTEM_PROMPT: &str =
     "You are running a periodic health check. Review the following checklist items \

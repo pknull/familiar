@@ -30,15 +30,6 @@ impl EgregoreClient {
         }
     }
 
-    pub fn api_url(&self) -> &str {
-        &self.api_url
-    }
-
-    /// Check if this client has an auth token configured.
-    pub fn has_auth_token(&self) -> bool {
-        self.api_token.is_some()
-    }
-
     /// Check if egregore requires auth by probing the API.
     /// Returns true if a 401 is received without a token.
     pub async fn requires_auth(&self) -> bool {
@@ -59,12 +50,10 @@ impl EgregoreClient {
         tags: &[&str],
     ) -> Result<String> {
         // Preemptive auth check: refuse to publish if daemon requires auth and no token configured
-        if self.api_token.is_none() {
-            if self.requires_auth().await {
-                return Err(FamiliarError::Egregore {
+        if self.api_token.is_none() && self.requires_auth().await {
+            return Err(FamiliarError::Egregore {
                     reason: "egregore API requires authentication but no api_token is configured in familiar.toml".into(),
                 });
-            }
         }
 
         let response = self.publish_raw(content, tags, None, None).await?;

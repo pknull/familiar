@@ -106,10 +106,10 @@ impl Trigger {
 /// Parse HEARTBEAT.md content into structured config.
 pub fn parse(content: &str) -> HeartbeatConfig {
     // Check for YAML frontmatter
-    if content.starts_with("---") {
-        if let Some(end) = content[3..].find("---") {
-            let yaml = &content[3..3 + end].trim();
-            let body = content[3 + end + 3..].trim().to_string();
+    if let Some(rest) = content.strip_prefix("---") {
+        if let Some(end) = rest.find("---") {
+            let yaml = rest[..end].trim();
+            let body = rest[end + 3..].trim().to_string();
 
             // Parse YAML frontmatter
             let triggers = parse_yaml_triggers(yaml);

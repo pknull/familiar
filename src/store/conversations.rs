@@ -11,8 +11,6 @@ pub struct Turn {
     pub id: i64,
     pub role: String,
     pub content: String,
-    pub tool_calls: Option<String>,
-    pub created_at: String,
 }
 
 impl Store {
@@ -28,7 +26,7 @@ impl Store {
     /// Get recent conversation turns (most recent last).
     pub fn recent_turns(&self, limit: usize) -> Result<Vec<Turn>> {
         let mut stmt = self.conn().prepare(
-            "SELECT id, role, content, tool_calls, created_at
+            "SELECT id, role, content
              FROM conversations
              ORDER BY id DESC
              LIMIT ?1",
@@ -40,8 +38,6 @@ impl Store {
                     id: row.get(0)?,
                     role: row.get(1)?,
                     content: row.get(2)?,
-                    tool_calls: row.get(3)?,
-                    created_at: row.get(4)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -65,30 +61,6 @@ impl Store {
         self.conn()
             .execute("DELETE FROM conversations WHERE id < ?1", params![id])?;
         Ok(())
-    }
-
-    /// Get the oldest N conversation turns (oldest first).
-    pub fn oldest_turns(&self, limit: usize) -> Result<Vec<Turn>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT id, role, content, tool_calls, created_at
-             FROM conversations
-             ORDER BY id ASC
-             LIMIT ?1",
-        )?;
-
-        let turns = stmt
-            .query_map(params![limit as i64], |row| {
-                Ok(Turn {
-                    id: row.get(0)?,
-                    role: row.get(1)?,
-                    content: row.get(2)?,
-                    tool_calls: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(turns)
     }
 
     /// Log a published message (for local reference).

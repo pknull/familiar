@@ -18,12 +18,12 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::agent::conversation::Conversation;
-use thallus_core::provider::create_provider;
 use crate::config::Config;
 use crate::egregore::EgregoreClient;
 use crate::error::{FamiliarError, Result};
 use crate::mcp::McpPool;
 use crate::store::Store;
+use thallus_core::provider::create_provider;
 
 #[derive(Parser)]
 #[command(name = "familiar", version, about = "Personal companion for Thallus")]
@@ -125,8 +125,10 @@ async fn run(cli: Cli) -> Result<()> {
         mcp_pool.add_client(name, server_config)?;
     }
     if !config.mcp.is_empty() {
-        mcp_pool.initialize_all().await;
-        tracing::info!(servers = config.mcp.len(), "MCP servers initialized");
+        match mcp_pool.initialize_all().await {
+            Ok(()) => tracing::info!(servers = config.mcp.len(), "MCP servers initialized"),
+            Err(e) => tracing::warn!(error = %e, "MCP server initialization failed"),
+        }
     }
 
     // Open local store
@@ -141,7 +143,7 @@ async fn run(cli: Cli) -> Result<()> {
             if sessions.is_empty() {
                 println!("No sessions found.");
             } else {
-                println!("{:<38} {:<30} {}", "ID", "Slug", "Updated");
+                println!("{:<38} {:<30} Updated", "ID", "Slug");
                 println!("{}", "-".repeat(80));
                 for s in &sessions {
                     println!("{:<38} {:<30} {}", s.id, s.slug, s.updated_at);
@@ -352,7 +354,6 @@ async fn run(cli: Cli) -> Result<()> {
                     let pane_source = pane.source.clone();
                     let pane_filter = pane.filter_content_type.clone();
                     let pane_command = pane.command.clone();
-                    let pane_restart = pane.restart;
                     let poll_secs = pane.poll_interval_secs.unwrap_or(10);
 
                     tokio::spawn(async move {

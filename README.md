@@ -67,7 +67,7 @@ Config file at `~/.familiar/familiar.toml`. Minimal working config:
 api_url = "http://127.0.0.1:7654"
 
 [llm]
-provider = "anthropic"                    # anthropic | openai | claude-code
+provider = "anthropic"                    # anthropic | openai
 model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
 
@@ -100,7 +100,6 @@ path = "~/.familiar/familiar.db"
 |----------|-------------|
 | `anthropic` | Direct Claude API (set `api_key_env`) |
 | `openai` | OpenAI-compatible API |
-| `claude-code` | Uses the Claude Code CLI as a subprocess |
 
 All providers share a common interface via `thallus-core`. See the provider module in `thallus-core/src/provider/` for details.
 
@@ -172,7 +171,6 @@ Local state lives in encrypted SQLite (`rusqlite` with bundled-sqlcipher):
 | conversations | Conversation threads and turns |
 | context | Contextual knowledge snippets |
 | sessions | Session metadata and slugs |
-| snapshots | Conversation snapshots for resume |
 | usage | Token and cost tracking |
 
 ### TUI Mode

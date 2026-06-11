@@ -29,9 +29,6 @@ pub enum FamiliarError {
     #[error("Egregore API error: {reason}")]
     Egregore { reason: String },
 
-    #[error("Timeout after {seconds}s")]
-    Timeout { seconds: u64 },
-
     #[error("Store error: {reason}")]
     Store { reason: String },
 

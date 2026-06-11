@@ -732,7 +732,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "serenity",
- "sha2",
  "shellexpand",
  "tempfile",
  "thallus-core",

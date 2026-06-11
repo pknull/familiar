@@ -7,13 +7,11 @@ pub mod layout;
 pub mod ui;
 pub mod widgets;
 
-use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use futures::StreamExt;
-use ratatui::DefaultTerminal;
 use ratatui_textarea::TextArea;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;

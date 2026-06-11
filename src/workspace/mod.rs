@@ -20,7 +20,7 @@ pub mod seeds;
 
 use std::path::{Path, PathBuf};
 
-use chrono::{Local, NaiveDate};
+use chrono::Local;
 use tracing::{debug, warn};
 
 use crate::error::{FamiliarError, Result};
@@ -131,9 +131,9 @@ impl Workspace {
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
                 .filter(|p| {
-                    p.extension().map_or(false, |ext| ext == "md")
+                    p.extension().is_some_and(|ext| ext == "md")
                         && p.file_name()
-                            .map_or(true, |n| !known.contains(&n.to_str().unwrap_or("")))
+                            .is_none_or(|n| !known.contains(&n.to_str().unwrap_or("")))
                 })
                 .collect();
             extras.sort();
@@ -204,10 +204,7 @@ impl Workspace {
                 return None;
             }
         };
-        match std::fs::read_to_string(&path) {
-            Ok(content) => Some(content),
-            Err(_) => None,
-        }
+        std::fs::read_to_string(&path).ok()
     }
 
     /// Write to a workspace file, with path validation and injection scanning.
@@ -267,7 +264,7 @@ impl Workspace {
             let path = entry.path();
             if path.is_dir() {
                 self.list_recursive(base, &path, files)?;
-            } else if path.extension().map_or(false, |ext| ext == "md") {
+            } else if path.extension().is_some_and(|ext| ext == "md") {
                 let relative = path
                     .strip_prefix(base)
                     .unwrap_or(&path)
@@ -438,7 +435,7 @@ mod tests {
         };
         let prompt = ws.assemble_prompt(false);
         // Should not panic, may be empty or contain only non-ordered files
-        assert!(prompt.is_empty() || prompt.len() > 0);
+        assert!(prompt.is_empty() || !prompt.is_empty());
     }
 
     #[test]

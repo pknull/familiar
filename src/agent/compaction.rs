@@ -3,8 +3,8 @@
 //! Uses the configured LLM provider to distill conversation turns into a structured
 //! summary with labeled sections, preserving high-signal context while pruning noise.
 
-use thallus_core::provider::{Message, Provider};
 use crate::error::Result;
+use thallus_core::provider::{Message, Provider};
 
 const COMPACTION_PROMPT: &str = r#"You are compacting a conversation history to save context space.
 
@@ -31,10 +31,6 @@ Rules:
 - Keep total under 2000 characters
 - Discard: greetings, verbatim code, intermediate reasoning, raw tool output
 - Preserve: decisions, facts, preferences, commitments, current state"#;
-
-const TITLE_PROMPT: &str = r#"Summarize this conversation in 3-5 words for use as a session name/slug.
-Output ONLY the slug words, lowercase, separated by hyphens. No explanation.
-Example: "rust-auth-refactor" or "egregore-feed-debugging""#;
 
 /// Maximum characters for a compaction summary.
 const MAX_SUMMARY_CHARS: usize = 2000;
@@ -81,40 +77,6 @@ pub async fn compact(
     let raw = response.text();
 
     Ok(compress_summary(&raw))
-}
-
-/// Generate a session title slug from the first exchange.
-pub async fn generate_title(
-    provider: &dyn Provider,
-    first_user_message: &str,
-    first_assistant_message: &str,
-) -> Result<String> {
-    let exchange = format!(
-        "User: {}\nAssistant: {}",
-        first_user_message, first_assistant_message
-    );
-    let messages = vec![Message::user(&exchange)];
-    let response = provider.chat(TITLE_PROMPT, &messages, &[]).await?;
-
-    let slug = response
-        .text()
-        .trim()
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == ' ')
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("-");
-
-    let slug: String = slug.chars().take(40).collect();
-    let slug = slug.trim_end_matches('-').to_string();
-
-    Ok(if slug.is_empty() {
-        "untitled".to_string()
-    } else {
-        slug
-    })
 }
 
 /// Compress a summary to fit within budget: dedup lines, cap length and line count.
