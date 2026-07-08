@@ -21,7 +21,7 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "1"
 anyhow = "1"
 async-trait = "0.1"
-rusqlite = { version = "0.31", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 rand = "0.8"
 hex = "0.4"
 rustyline = "14"
@@ -42,7 +42,7 @@ ratatui-textarea = "0.8.0"
 tempfile = "3"
 tokio-test = "0.4"
 # Raw keyed access in tests to corrupt the store and force bind failures.
-rusqlite = { version = "0.31", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [lib]
 name = "familiar"
