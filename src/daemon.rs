@@ -142,6 +142,32 @@ const SHORT_RETRY_SECS: u64 = 5;
 /// Long retry delay after repeated failures (seconds).
 const LONG_RETRY_SECS: u64 = 60;
 
+/// Maximum model-generated answer size accepted for a network response.
+const MAX_QUERY_RESPONSE_BYTES: usize = 16 * 1024;
+
+fn is_canonical_message_hash(hash: &str) -> bool {
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn response_content(query_hash: &str, answer: &str) -> Option<serde_json::Value> {
+    let mut end = answer.len().min(MAX_QUERY_RESPONSE_BYTES);
+    while !answer.is_char_boundary(end) {
+        end -= 1;
+    }
+    let answer = &answer[..end];
+    if answer.trim().is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "type": "response",
+        "query_hash": query_hash,
+        "answer": answer,
+    }))
+}
+
 /// Daemon — persistent feed watcher and auto-responder.
 pub struct Daemon {
     conversation: Conversation,
@@ -675,9 +701,14 @@ impl Daemon {
                 .any(|r| r.as_str() == Some(&self.identity_id));
         }
 
-        // Check if our ID is mentioned in the body.
-        if let Some(body) = content.get("body").and_then(|b| b.as_str()) {
-            if body.contains(&self.identity_id) {
+        // Canonical queries carry `question`; older peers used `body`.
+        // Only consult the legacy field when the canonical field is absent.
+        if let Some(question) = content
+            .get("question")
+            .and_then(|value| value.as_str())
+            .or_else(|| content.get("body").and_then(|value| value.as_str()))
+        {
+            if question.contains(&self.identity_id) {
                 return true;
             }
         }
@@ -891,7 +922,11 @@ impl Daemon {
                 reason: "query message missing content".into(),
             })?;
 
-        let body = content.get("body").and_then(|b| b.as_str()).unwrap_or("");
+        let question = content
+            .get("question")
+            .and_then(|value| value.as_str())
+            .or_else(|| content.get("body").and_then(|value| value.as_str()))
+            .unwrap_or("");
 
         let author = message
             .get("author")
@@ -900,26 +935,43 @@ impl Daemon {
 
         let hash = message.get("hash").and_then(|h| h.as_str()).unwrap_or("");
 
-        // Build a prompt that gives the LLM context about the incoming query.
+        // Query linkage is a protocol security boundary. Reject malformed
+        // hashes before untrusted content reaches even the untooled model.
+        if !is_canonical_message_hash(hash) {
+            tracing::warn!(hash, "ignoring query with malformed message hash");
+            return Ok(());
+        }
+
+        // Ask only for opaque answer text. Trusted code below owns protocol
+        // content construction and publication.
         let prompt = format!(
             "[Incoming network query from {author}]\n\
              Message hash: {hash}\n\n\
-             {body}\n\n\
-             Respond to this query on the network feed. Use egregore_publish to post your response \
-             with type \"response\" and include the original hash as a \"relates\" field."
+             {question}\n\n\
+             Provide only the answer text."
         );
 
         tracing::info!(author, hash, "responding to query");
 
-        // Network queries are answered onto the public feed — generate the
-        // response with the privacy-reduced group prompt, never with the
-        // operator's MEMORY/USER/profile/daily-log context. Intentionally
-        // never reset: handle_query is the daemon's only conversation.send
-        // call site, and every public-facing surface must stay group.
-        self.conversation.set_group_context(true);
-
-        match self.conversation.send(&prompt, None).await {
+        match self.conversation.respond_untooled(&prompt).await {
             Ok((response, _usage)) => {
+                let Some(content) = response_content(hash, &response) else {
+                    tracing::warn!(hash, "skipping empty query response");
+                    return Ok(());
+                };
+
+                match self
+                    .egregore
+                    .publish_related_content(content, &["response"], hash)
+                    .await
+                {
+                    Ok(response_hash) => {
+                        tracing::info!(hash, response_hash, "query response published");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, hash, "failed to publish query response");
+                    }
+                }
                 tracing::info!(
                     hash,
                     response_len = response.len(),

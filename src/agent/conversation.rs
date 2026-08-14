@@ -161,8 +161,8 @@ impl Conversation {
     }
 
     /// Assemble the system prompt from workspace files and profile.
-    fn system_prompt(&self) -> String {
-        let mut base = self.workspace.assemble_prompt(self.group_context);
+    fn system_prompt(&self, group_context: bool) -> String {
+        let mut base = self.workspace.assemble_prompt(group_context);
 
         // If config has an override, prepend it
         if let Some(ref override_prompt) = self.config.system_prompt {
@@ -170,7 +170,7 @@ impl Conversation {
         }
 
         // Inject profile if not in group context (privacy)
-        if !self.group_context {
+        if !group_context {
             // Tier 2 supersedes Tier 1 when available
             if let Some(prompt) = self.profile.tier2_prompt() {
                 base = format!("{}\n\n---\n\n{}", base, prompt);
@@ -256,7 +256,16 @@ impl Conversation {
         let tools = self.build_tools().await;
 
         // Run the tool-use loop
-        let (response_text, usage) = self.run_loop(messages, &tools, on_text.as_ref()).await?;
+        let (mut response_text, usage) = self
+            .run_loop(messages, &tools, self.group_context, on_text.as_ref())
+            .await?;
+
+        // Operator-facing channels retain the historical visible fallback.
+        // Untooled network responses deliberately preserve raw empty output so
+        // trusted daemon code can reject it instead of publishing a placeholder.
+        if response_text.is_empty() {
+            response_text = "(no response)".to_string();
+        }
 
         // Persist the assistant response and mark the session active.
         if let Some(thread) = &self.thread {
@@ -266,6 +275,19 @@ impl Conversation {
         }
 
         Ok((response_text, usage))
+    }
+
+    /// Generate a privacy-reduced response without advertising or executing tools.
+    ///
+    /// This is the security boundary for network-originated input: such input
+    /// must never reach a tool-bearing model turn. It intentionally bypasses
+    /// bound history, persistence, profile extraction, and compaction, and
+    /// sends only the current input under group-context prompt semantics.
+    /// Group privacy is passed explicitly so cancellation cannot mutate the
+    /// context used by a later operator-facing turn.
+    pub async fn respond_untooled(&self, prompt: &str) -> Result<(String, ConversationUsage)> {
+        self.run_loop(vec![Message::user(prompt)], &[], true, None)
+            .await
     }
 
     /// Build the message history for the LLM.
@@ -452,6 +474,7 @@ impl Conversation {
         &self,
         mut messages: Vec<Message>,
         tools: &[LlmTool],
+        group_context: bool,
         on_text: Option<&TextCallback>,
     ) -> Result<(String, ConversationUsage)> {
         let mut total_usage = ConversationUsage::default();
@@ -468,7 +491,7 @@ impl Conversation {
                 tools
             };
 
-            let system = self.system_prompt();
+            let system = self.system_prompt(group_context);
 
             // Check completion cache before calling provider
             let cached = self
@@ -571,6 +594,14 @@ impl Conversation {
                 break;
             }
 
+            // A provider can violate the request contract and emit tool_use
+            // even when no tools were advertised. The untooled boundary must
+            // fail closed: never dispatch such a call or feed its result back.
+            if active_tools.is_empty() {
+                tracing::warn!(turn, "ignoring tool use from an untooled model turn");
+                break;
+            }
+
             // Successful tool use — reset nudge counter
             nudge_count = 0;
 
@@ -598,10 +629,6 @@ impl Conversation {
             }
 
             messages.push(Message::tool_results(tool_results));
-        }
-
-        if response_text.is_empty() {
-            response_text = "(no response)".to_string();
         }
 
         // Estimate cost and record usage

@@ -49,6 +49,27 @@ impl EgregoreClient {
         content: serde_json::Value,
         tags: &[&str],
     ) -> Result<String> {
+        self.publish_content_with_relation(content, tags, None)
+            .await
+    }
+
+    /// Publish content linked to an existing feed message by envelope hash.
+    pub async fn publish_related_content(
+        &self,
+        content: serde_json::Value,
+        tags: &[&str],
+        relates: &str,
+    ) -> Result<String> {
+        self.publish_content_with_relation(content, tags, Some(relates))
+            .await
+    }
+
+    async fn publish_content_with_relation(
+        &self,
+        content: serde_json::Value,
+        tags: &[&str],
+        relates: Option<&str>,
+    ) -> Result<String> {
         // Preemptive auth check: refuse to publish if daemon requires auth and no token configured
         if self.api_token.is_none() && self.requires_auth().await {
             return Err(FamiliarError::Egregore {
@@ -56,7 +77,7 @@ impl EgregoreClient {
                 });
         }
 
-        let response = self.publish_raw(content, tags, None, None).await?;
+        let response = self.publish_raw(content, tags, relates, None, None).await?;
         Ok(response.hash)
     }
 
@@ -65,6 +86,7 @@ impl EgregoreClient {
         &self,
         content: serde_json::Value,
         tags: &[&str],
+        relates: Option<&str>,
         trace_id: Option<&str>,
         span_id: Option<&str>,
     ) -> Result<PublishedMessage> {
@@ -73,6 +95,7 @@ impl EgregoreClient {
         let request = PublishRequest {
             content,
             tags: tags.iter().map(|s| s.to_string()).collect(),
+            relates: relates.map(str::to_string),
             trace_id: trace_id.map(str::to_string),
             span_id: span_id.map(str::to_string),
         };
@@ -220,6 +243,8 @@ impl EgregoreClient {
 struct PublishRequest {
     content: serde_json::Value,
     tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relates: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
