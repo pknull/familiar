@@ -94,14 +94,16 @@ impl Store {
 
     /// Retrieve locally stored metadata for a published message hash.
     pub fn published_metadata(&self, hash: &str) -> Result<Option<serde_json::Value>> {
+        // metadata_json is nullable: rows logged without metadata store NULL.
         let metadata_json: Option<String> = self
             .conn()
             .query_row(
                 "SELECT metadata_json FROM published WHERE hash = ?1 ORDER BY id DESC LIMIT 1",
                 params![hash],
-                |row| row.get(0),
+                |row| row.get::<_, Option<String>>(0),
             )
-            .optional()?;
+            .optional()?
+            .flatten();
 
         metadata_json
             .map(|json| serde_json::from_str(&json).map_err(crate::error::FamiliarError::from))

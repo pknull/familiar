@@ -252,6 +252,12 @@ impl Daemon {
             "daemon starting"
         );
 
+        if self.agent_config.trusted_servitors.is_empty() {
+            tracing::warn!(
+                "task auto-assignment is disabled: configure agent.trusted_servitors to enable it"
+            );
+        }
+
         let mut consecutive_failures: u32 = 0;
         let shutdown = tokio::signal::ctrl_c();
         tokio::pin!(shutdown);
@@ -426,7 +432,21 @@ impl Daemon {
             None => return Ok(()),
         };
 
-        // Record the offer
+        // Identity binding: the claimed executor must be the signing feed
+        // author. A spoofed offer is dropped without being recorded.
+        let author = message.get("author").and_then(|a| a.as_str()).unwrap_or("");
+        if author != servitor {
+            tracing::warn!(
+                claimed_servitor = %servitor,
+                signing_author = %author,
+                task_id,
+                "rejecting task_offer: claimed executor is not the signing author"
+            );
+            return Ok(());
+        }
+
+        // Record the offer so an operator can act on it even when
+        // auto-assignment stays disabled.
         self.tracker.add_offer(
             task_id,
             PendingOffer {
@@ -435,17 +455,23 @@ impl Daemon {
             },
         );
 
-        // Trust validation
-        if !self.agent_config.trusted_servitors.is_empty()
-            && !self.agent_config.trusted_servitors.contains(&servitor)
-        {
+        // Fail-closed trust: auto-assignment requires explicit configuration.
+        if self.agent_config.trusted_servitors.is_empty() {
+            tracing::debug!(
+                servitor,
+                task_id,
+                "offer recorded; auto-assignment disabled until trusted_servitors is configured"
+            );
+            return Ok(());
+        }
+        if !self.agent_config.trusted_servitors.contains(&servitor) {
             tracing::debug!(servitor, task_id, "ignoring offer from untrusted servitor");
             return Ok(());
         }
 
-        if self.agent_config.verify_servitor_profile
-            && !self.offer_matches_planner_basis(task_id, &servitor).await?
-        {
+        // Verified trust: the offer must match the servitor's published
+        // profile and the task's planner basis before assignment.
+        if !self.offer_matches_planner_basis(task_id, &servitor).await? {
             tracing::debug!(
                 servitor,
                 task_id,
@@ -654,13 +680,12 @@ impl Daemon {
             // Queries from other agents — we may want to respond.
             "query" => self.is_query_for_us(content),
 
-            // Planner-visible executor profiles may be needed for offer verification.
-            "servitor_profile" => {
-                self.agent_config.verify_servitor_profile
-                    || !self.agent_config.trusted_servitors.is_empty()
-            }
-            "servitor_manifest" | "environment_snapshot" => {
-                self.agent_config.verify_servitor_profile
+            // Planner-visible executor profiles, manifests, and snapshots are
+            // needed for mandatory offer verification whenever trust is
+            // configured; without trusted servitors nothing can be assigned,
+            // so nothing needs caching.
+            "servitor_profile" | "servitor_manifest" | "environment_snapshot" => {
+                !self.agent_config.trusted_servitors.is_empty()
             }
 
             // Task results — check if we published the originating task.

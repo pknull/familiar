@@ -96,12 +96,13 @@ pub struct AgentConfig {
     /// Number of recent turns to preserve during compaction (default: 10).
     #[serde(default = "default_preserve_recent_turns")]
     pub preserve_recent_turns: usize,
-    /// Public IDs of trusted servitors for auto-assignment. Empty = accept all.
+    /// Public IDs of trusted servitors for auto-assignment.
+    ///
+    /// Fail-closed: an empty list disables auto-assignment entirely — offers
+    /// are recorded but never assigned. Assignment additionally requires the
+    /// offering servitor's cached profile to match the task's planner basis.
     #[serde(default)]
     pub trusted_servitors: Vec<String>,
-    /// Require servitor to have published a matching servitor_profile before accepting offer.
-    #[serde(default)]
-    pub verify_servitor_profile: bool,
     /// Enable background SSE watching in all modes (default: true).
     #[serde(default = "default_background_sse")]
     pub background_sse_enabled: bool,
@@ -118,7 +119,6 @@ impl Default for AgentConfig {
             compaction_token_budget: default_compaction_token_budget(),
             preserve_recent_turns: default_preserve_recent_turns(),
             trusted_servitors: Vec::new(),
-            verify_servitor_profile: false,
             background_sse_enabled: default_background_sse(),
         }
     }

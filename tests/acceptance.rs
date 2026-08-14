@@ -628,6 +628,12 @@ mod harness {
             .expect("capture server task failed")
     }
 
+    /// Assert that the capture server never receives a publish request.
+    async fn assert_no_publish(request: JoinHandle<serde_json::Value>) {
+        let result = timeout(Duration::from_millis(750), request).await;
+        assert!(result.is_err(), "daemon published unexpectedly");
+    }
+
     fn addressed_query(hash: &str, question: &str) -> serde_json::Value {
         serde_json::json!({
             "author": "@curious-peer",
@@ -1687,6 +1693,214 @@ triggers:
         let request = captured_publish(request).await;
         assert_eq!(request["content"]["answer"], "recipients answer");
         assert_eq!(request["relates"], hash);
+    }
+
+    struct OfferHarness {
+        daemon: Daemon,
+        request: JoinHandle<serde_json::Value>,
+        _tmp: TempDir,
+    }
+
+    /// Build a daemon with a locally published task and the given trust list.
+    fn build_offer_harness(
+        tmp: TempDir,
+        api_url: String,
+        request: JoinHandle<serde_json::Value>,
+        task_id: &str,
+        trusted_servitors: Vec<String>,
+    ) -> OfferHarness {
+        let built = build_conversation(
+            &tmp,
+            "mock",
+            "unused",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+        let store_path = built.store_db.to_string_lossy().into_owned();
+        Store::open(std::path::Path::new(&store_path))
+            .unwrap()
+            .log_published(task_id, "task", None, None)
+            .unwrap();
+        let workspace = Workspace::new(tmp.path().join("daemon-workspace")).unwrap();
+        let daemon = Daemon::new(
+            built.conversation,
+            EgregoreClient::new(&api_url, Some("test-token".into())),
+            api_url,
+            "@test-identity".into(),
+            store_path,
+            DaemonConfig::default(),
+            AgentConfig {
+                trusted_servitors,
+                ..AgentConfig::default()
+            },
+            workspace,
+            (0, 0),
+        );
+        OfferHarness {
+            daemon,
+            request,
+            _tmp: tmp,
+        }
+    }
+
+    fn offer_message(author: &str, task_id: &str, claimed_servitor: &str) -> String {
+        serde_json::json!({
+            "author": author,
+            "hash": "abababababababababababababababababababababababababababababababab",
+            "content": {
+                "type": "task_offer",
+                "task_id": task_id,
+                "servitor": claimed_servitor,
+            }
+        })
+        .to_string()
+    }
+
+    fn profile_message(servitor: &str) -> String {
+        serde_json::json!({
+            "author": servitor,
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "timestamp": "2026-08-14T00:00:00Z",
+            "content": {
+                "type": "servitor_profile",
+                "servitor_id": servitor,
+            }
+        })
+        .to_string()
+    }
+
+    /// A task_offer whose claimed servitor is not the signing author is
+    /// rejected outright: no assignment is published.
+    #[tokio::test]
+    async fn daemon_rejects_spoofed_task_offer() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let (api_url, request) = capture_publish_request().await;
+        let task_id = "task-under-offer";
+        let mut h = build_offer_harness(
+            tmp,
+            api_url,
+            request,
+            task_id,
+            vec!["@servitor-a".into()],
+        );
+
+        h.daemon
+            .handle_sse_message(&offer_message("@evil-peer", task_id, "@servitor-a"))
+            .await
+            .unwrap();
+
+        assert_no_publish(h.request).await;
+    }
+
+    /// An empty trusted_servitors list disables auto-assignment even for an
+    /// identity-bound offer.
+    #[tokio::test]
+    async fn daemon_disables_assignment_without_trusted_servitors() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let (api_url, request) = capture_publish_request().await;
+        let task_id = "task-under-offer";
+        let mut h = build_offer_harness(tmp, api_url, request, task_id, Vec::new());
+
+        h.daemon
+            .handle_sse_message(&offer_message("@servitor-a", task_id, "@servitor-a"))
+            .await
+            .unwrap();
+
+        assert_no_publish(h.request).await;
+    }
+
+    /// A trusted, identity-bound, profile-verified offer is auto-assigned.
+    #[tokio::test]
+    async fn daemon_assigns_trusted_verified_offer() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let (api_url, request) = capture_publish_request().await;
+        let task_id = "task-under-offer";
+        let mut h = build_offer_harness(
+            tmp,
+            api_url,
+            request,
+            task_id,
+            vec!["@servitor-a".into()],
+        );
+
+        h.daemon
+            .handle_sse_message(&profile_message("@servitor-a"))
+            .await
+            .unwrap();
+        h.daemon
+            .handle_sse_message(&offer_message("@servitor-a", task_id, "@servitor-a"))
+            .await
+            .unwrap();
+
+        let request = captured_publish(h.request).await;
+        assert_eq!(request["content"]["type"], "task_assign");
+        assert_eq!(request["content"]["task_id"], task_id);
+        assert_eq!(request["content"]["servitor"], "@servitor-a");
+    }
+
+    /// A trusted offer whose cached profile does not match the task's planner
+    /// basis is not assigned.
+    #[tokio::test]
+    async fn daemon_skips_offer_with_mismatched_planner_basis() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let (api_url, request) = capture_publish_request().await;
+        let task_id = "task-under-offer";
+        let built = build_conversation(
+            &tmp,
+            "mock",
+            "unused",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+        let store_path = built.store_db.to_string_lossy().into_owned();
+        Store::open(std::path::Path::new(&store_path))
+            .unwrap()
+            .log_published(
+                task_id,
+                "task",
+                None,
+                Some(&serde_json::json!({
+                    "context": { "planner_basis": { "manifest_ref": "mf-required" } }
+                })),
+            )
+            .unwrap();
+        let workspace = Workspace::new(tmp.path().join("daemon-workspace")).unwrap();
+        let mut daemon = Daemon::new(
+            built.conversation,
+            EgregoreClient::new(&api_url, Some("test-token".into())),
+            api_url,
+            "@test-identity".into(),
+            store_path,
+            DaemonConfig::default(),
+            AgentConfig {
+                trusted_servitors: vec!["@servitor-a".into()],
+                ..AgentConfig::default()
+            },
+            workspace,
+            (0, 0),
+        );
+
+        // Cached profile carries no manifest_ref, so it cannot match.
+        daemon
+            .handle_sse_message(&profile_message("@servitor-a"))
+            .await
+            .unwrap();
+        daemon
+            .handle_sse_message(&offer_message("@servitor-a", task_id, "@servitor-a"))
+            .await
+            .unwrap();
+
+        assert_no_publish(request).await;
     }
 
     /// Older peers using `body` remain compatible as a fallback for both
