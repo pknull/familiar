@@ -37,6 +37,12 @@ impl DiscordChannel {
             reason: format!("environment variable {} not set", config.token_env),
         })?;
 
+        if config.guild_allowlist.is_empty() {
+            tracing::warn!(
+                "guild messages are disabled: configure discord.guild_allowlist to enable them (DMs are unaffected)"
+            );
+        }
+
         let (tx, rx) = mpsc::channel(100);
 
         let handler = FamiliarDiscordHandler {
@@ -152,11 +158,10 @@ impl EventHandler for FamiliarDiscordHandler {
             return;
         }
 
-        // Guild allowlist
+        // Guild allowlist — fail closed: an empty list admits no guilds.
         if let Some(guild_id) = msg.guild_id {
-            if !self.config.guild_allowlist.is_empty()
-                && !self.config.guild_allowlist.contains(&guild_id.to_string())
-            {
+            if !guild_allowed(&guild_id.to_string(), &self.config.guild_allowlist) {
+                tracing::debug!(guild_id = %guild_id, "skipping message from unlisted guild");
                 return;
             }
         }
@@ -222,6 +227,14 @@ impl EventHandler for FamiliarDiscordHandler {
 /// Guild messages are always group. DMs are only trusted with the operator's
 /// private context when the author is on the dm_user_allowlist — any Discord
 /// user can DM a bot, so an empty allowlist trusts no one.
+/// Decide whether a guild's messages are processed at all.
+///
+/// Fail-closed: an empty allowlist admits no guilds. DMs never pass through
+/// this gate.
+pub fn guild_allowed(guild_id: &str, guild_allowlist: &[String]) -> bool {
+    guild_allowlist.iter().any(|id| id == guild_id)
+}
+
 pub fn is_group_message(in_guild: bool, author_id: &str, dm_user_allowlist: &[String]) -> bool {
     in_guild || !dm_user_allowlist.iter().any(|id| id == author_id)
 }

@@ -323,7 +323,10 @@ pub struct DiscordConfig {
     /// Environment variable containing bot token.
     pub token_env: String,
 
-    /// Guild IDs to allow (empty = all guilds).
+    /// Guild IDs whose messages are processed.
+    ///
+    /// Fail-closed: an empty list disables guild messages entirely. DMs are
+    /// governed separately by `dm_user_allowlist`.
     #[serde(default)]
     pub guild_allowlist: Vec<String>,
 

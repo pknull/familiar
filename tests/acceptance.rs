@@ -1222,6 +1222,18 @@ triggers:
         );
     }
 
+    /// Guild admission fails closed: an empty guild_allowlist admits no
+    /// guilds, and a configured list admits only its members.
+    #[test]
+    fn guild_admission_fails_closed() {
+        use familiar::channel::discord::guild_allowed;
+        let allow = vec!["7001".to_string()];
+
+        assert!(!guild_allowed("7001", &[]), "empty allowlist admits nothing");
+        assert!(guild_allowed("7001", &allow), "listed guild admitted");
+        assert!(!guild_allowed("7002", &allow), "unlisted guild denied");
+    }
+
     /// Group messages can't run session commands (/context would dump the
     /// private context store; /quit would kill the session), and the model
     /// is not offered personal-data tools.
