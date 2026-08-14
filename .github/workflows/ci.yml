@@ -10,12 +10,24 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
 
+permissions:
+  contents: read
+
 jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: familiar
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          path: familiar
+      - uses: actions/checkout@v7
+        with:
+          repository: pknull/thallus-core
+          path: thallus-core
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -28,8 +40,17 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: familiar
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          path: familiar
+      - uses: actions/checkout@v7
+        with:
+          repository: pknull/thallus-core
+          path: thallus-core
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -42,8 +63,17 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: familiar
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          path: familiar
+      - uses: actions/checkout@v7
+        with:
+          repository: pknull/thallus-core
+          path: thallus-core
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -54,8 +84,17 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: familiar
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          path: familiar
+      - uses: actions/checkout@v7
+        with:
+          repository: pknull/thallus-core
+          path: thallus-core
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -66,8 +105,17 @@ jobs:
   audit:
     name: Security audit
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: familiar
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          path: familiar
+      - uses: actions/checkout@v7
+        with:
+          repository: pknull/thallus-core
+          path: thallus-core
 
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
