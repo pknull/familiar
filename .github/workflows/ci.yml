@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
 
 permissions:
   contents: read
@@ -58,7 +57,8 @@ jobs:
           components: clippy
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        # Familiar contains dormant feature scaffolding; keep other warnings strict.
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings -A dead-code
 
   test:
     name: Test
@@ -79,7 +79,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --locked --all-features
 
   build:
     name: Build
@@ -100,7 +100,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --locked --release
 
   audit:
     name: Security audit

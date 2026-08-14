@@ -190,12 +190,9 @@ impl Profile {
         }
 
         // Check freshness
-        if let Some(updated) = self.updated_at {
-            let age = Utc::now() - updated;
-            if age.num_days() > 7 {
-                return None;
-            }
-        } else {
+        let updated = self.updated_at?;
+        let age = Utc::now() - updated;
+        if age.num_days() > 7 {
             return None;
         }
 
