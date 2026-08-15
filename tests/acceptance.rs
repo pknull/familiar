@@ -1229,7 +1229,10 @@ triggers:
         use familiar::channel::discord::guild_allowed;
         let allow = vec!["7001".to_string()];
 
-        assert!(!guild_allowed("7001", &[]), "empty allowlist admits nothing");
+        assert!(
+            !guild_allowed("7001", &[]),
+            "empty allowlist admits nothing"
+        );
         assert!(guild_allowed("7001", &allow), "listed guild admitted");
         assert!(!guild_allowed("7002", &allow), "unlisted guild denied");
     }
@@ -1791,13 +1794,7 @@ triggers:
         let tmp = TempDir::new().unwrap();
         let (api_url, request) = capture_publish_request().await;
         let task_id = "task-under-offer";
-        let mut h = build_offer_harness(
-            tmp,
-            api_url,
-            request,
-            task_id,
-            vec!["@servitor-a".into()],
-        );
+        let mut h = build_offer_harness(tmp, api_url, request, task_id, vec!["@servitor-a".into()]);
 
         h.daemon
             .handle_sse_message(&offer_message("@evil-peer", task_id, "@servitor-a"))
@@ -1834,13 +1831,7 @@ triggers:
         let tmp = TempDir::new().unwrap();
         let (api_url, request) = capture_publish_request().await;
         let task_id = "task-under-offer";
-        let mut h = build_offer_harness(
-            tmp,
-            api_url,
-            request,
-            task_id,
-            vec!["@servitor-a".into()],
-        );
+        let mut h = build_offer_harness(tmp, api_url, request, task_id, vec!["@servitor-a".into()]);
 
         h.daemon
             .handle_sse_message(&profile_message("@servitor-a"))
