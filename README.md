@@ -86,13 +86,96 @@ path = "~/.familiar/familiar.db"
 | `[egregore]` | Egregore daemon URL and optional API token |
 | `[llm]` | LLM provider selection and credentials |
 | `[mcp.*]` | Local MCP servers exposed as tools |
-| `[agent]` | Conversation limits (`max_turns`, `timeout_secs`, `blocked_tools`) |
+| `[agent]` | Conversation limits, tool scope, compaction, background SSE flag, and servitor assignment trust |
 | `[store]` | Local SQLite database path (conversations, context, sessions) |
 | `[heartbeat]` | Optional background proactive-check loop with quiet hours |
-| `[repl]` | REPL prompt customization (prefix, suffix, system message) |
-| `[discord]` | Discord bot token env var and guild allowlist |
-| `[daemon]` | Daemon-mode feed watch settings |
+| `[repl]` | Plain-REPL labels (`user_prompt`, `familiar_prompt`, `thinking_text`) |
+| `[discord]` | Discord bot token env var plus guild-admission and DM-trust allowlists |
+| `[daemon]` | Daemon feed author, content-type, and tag filters |
 | `[tui]` | TUI sidebar panes (feed, tasks, peers, custom scripts) |
+| `[tools]` | Trust tiers for MCP tool output |
+| `[operator]` | Human-proxy capabilities and offer TTL configuration |
+
+### Agent Settings
+
+| Field | Behavior |
+|-------|----------|
+| `max_turns` | Maximum model/tool-loop iterations per request (default `20`). |
+| `timeout_secs` | Declared request timeout in seconds (default `300`); currently parsed but not enforced by the conversation loop. |
+| `system_prompt` | Optional text prepended to the workspace-assembled system prompt. |
+| `blocked_tools` | Exact tool names rejected before execution. |
+| `allowed_tools` | Trailing-wildcard allowlist for MCP tools; empty permits all, while built-in `egregore_*`, `local_*`, and `workspace_*` tools always pass this allowlist check. |
+| `compaction_token_budget` | Estimated thread-token threshold that triggers history summarization (default `80000`). |
+| `preserve_recent_turns` | Recent turns retained verbatim during compaction (default `10`). |
+| `background_sse_enabled` | Declared background-SSE switch (default `true`); currently parsed but not read by the runtime. |
+
+### Auto-assignment Trust: `trusted_servitors`
+
+`[agent].trusted_servitors` is **required to enable automatic task assignment**. It is a list of
+servitor public IDs, not a discovery filter. The default is empty and fails closed: the daemon
+warns at startup, records identity-bound offers for operator visibility, but assigns nothing.
+
+Add trusted IDs to the existing `[agent]` section:
+
+```toml
+[agent]
+max_turns = 20
+timeout_secs = 300
+trusted_servitors = ["@servitor-a"]
+```
+
+Listing an ID is necessary but not sufficient. Before publishing `task_assign`, Familiar also
+requires the offer's claimed `servitor` to equal the signing feed author and requires that
+servitor's published profile to match the task's recorded planner basis (including referenced
+manifest, deployment target, or environment snapshot constraints when present). The old
+`verify_servitor_profile` switch no longer exists; profile/planner-basis verification is mandatory.
+
+### Daemon Filters
+
+All three daemon filters default to empty, which means no restriction for that dimension:
+
+```toml
+[daemon]
+author_allowlist = ["@planner-a"]
+content_type_filter = ["query", "task_offer"]
+tag_filter = ["operations"]
+```
+
+- `author_allowlist` accepts only messages signed by one of the listed authors.
+- `content_type_filter` accepts only the listed `content.type` values.
+- `tag_filter` requires a message to contain at least one listed tag.
+
+### Tool Trust
+
+`[tools]` classifies MCP tool output after sanitization. `trusted` and `installed` accept exact
+names or trailing-wildcard patterns; trusted output is returned as-is, while installed (and
+unlisted) tool output receives a suggestion-only warning.
+
+```toml
+[tools]
+trusted = ["filesystem:read", "calendar:*"]
+installed = ["web_search"]
+```
+
+### Operator Proxy
+
+`[operator].capabilities` declares human capabilities such as `code-review` or `approval`; an
+empty list disables the human proxy. `offer_ttl_secs` defaults to `3600`. These fields are
+currently parsed configuration surface only—the runtime does not yet consume them.
+
+```toml
+[operator]
+capabilities = ["code-review", "approval"]
+offer_ttl_secs = 3600
+```
+
+### Discord Trust Boundaries
+
+`[discord].guild_allowlist` fails closed: an empty list admits no guild messages and emits a
+startup warning. DMs bypass the guild gate, but `dm_user_allowlist` separately governs which
+Discord user IDs are trusted with private operator context. A DM from an unlisted user is handled
+with privacy-reduced group context. `require_mention` controls mention gating for admitted guild
+messages and defaults to `true`.
 
 ### LLM Providers
 
@@ -161,6 +244,53 @@ Familiar is the **mind** in the Thallus architecture — it plans; [Servitor](..
 | `store/` | Local SQLite (conversations, context, sessions, usage) |
 | `tui/` | Terminal UI (ratatui-based operator console) |
 | `workspace/` | Prompt assembly from `~/.familiar/workspace/` files |
+
+### Daemon Mode
+
+`familiar daemon` connects to the Egregore SSE feed, ignores its own messages, applies the
+configured daemon filters, and handles explicitly addressed queries and lifecycle messages for
+tasks Familiar published. Broadcast queries without an explicit recipient or identity mention
+are ignored. Valid task offers are correlated with the local publish log, identity-bound, and
+recorded. Automatic assignment of the first eligible offer occurs only after the
+[`trusted_servitors` trust gate](#auto-assignment-trust-trusted_servitors) passes, including the
+mandatory published-profile and planner-basis checks; task results and failures then close the
+tracked lifecycle.
+
+**Network input containment.** Feed-originated queries are answered through an untooled model
+turn: no MCP, retrieval, workspace, or publish tools are advertised or executed, and the prompt
+uses privacy-reduced group context without bound history, persistence, profile extraction, or
+compaction. Trusted daemon code—not model output—constructs the protocol response, rejects empty
+answers, truncates answer text to 16 KiB on a UTF-8 boundary, and publishes it with an envelope
+`relates` link to the query. A query whose message hash is not a canonical 64-character lowercase
+hex hash is rejected before any model call.
+
+### Workspace Prompt Assembly
+
+The workspace lives at `~/.familiar/workspace/`. `src/workspace/seeds.rs` creates missing defaults
+without overwriting edits: `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md`, `TOOLS.md`, and
+`MEMORY.md`. For a private operator turn, `src/workspace/mod.rs` assembles those files in exactly
+that order, then yesterday's and today's `daily/YYYY-MM-DD.md` logs, then any additional top-level
+Markdown files in alphabetical order. An `[agent].system_prompt` override is prepended to this
+workspace prompt, and the local profile is appended afterward. Group contexts include only
+`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `TOOLS.md`; personal files, daily logs, extras, and the
+profile are omitted.
+
+`src/workspace/injection.rs` scans workspace writes for instruction-overrides, model boundary
+markers, and suspicious encoded instructions; daily logs are scanned again before prompt
+inclusion. `src/workspace/heartbeat.rs` parses optional `HEARTBEAT.md` YAML frontmatter. Triggers
+with `on: sse` match incoming feed fields in real time, while `on: heartbeat` supports `hourly`,
+`daily`, or `weekly` schedules. Both respect quiet hours and currently record firings in the daily
+log; trigger `action` names do not execute arbitrary commands. As an additional top-level Markdown
+file, `HEARTBEAT.md` is also included in private prompts in the extras phase.
+
+### Tool Hooks
+
+`src/hooks/mod.rs` defines pre/post tool events, hook decisions (allow, deny, or input mutation),
+and the runner invoked around conversation tool execution. No production startup path currently
+registers hooks, so the runner is empty by default.
+
+`src/hooks/shell.rs` is currently unused dead scaffolding: it implements JSON-over-stdin shell
+hooks, but production code never constructs or registers a `ShellHook`.
 
 ### Storage
 

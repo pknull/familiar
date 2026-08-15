@@ -2,6 +2,19 @@
 
 All notable changes to familiar are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this crate's pre-1.0 versioning treats minor bumps as the breaking-change signal.
 
+## [Unreleased] - 2026-08-14
+
+### Security
+
+- Network/feed-originated queries now use an untooled, privacy-reduced model turn; trusted daemon code validates and publishes the bounded response.
+- `task_offer` handling now binds the claimed servitor identity to the signing feed author.
+- Automatic task assignment now fails closed unless `[agent].trusted_servitors` is non-empty and contains the offering servitor. Published-profile and planner-basis verification is mandatory, and the `verify_servitor_profile` opt-out has been removed.
+- Discord guild admission now fails closed: an empty `guild_allowlist` admits no guilds and produces a startup warning.
+
+### Fixed
+
+- `published_metadata` now handles SQL `NULL` metadata rows instead of failing during mandatory task-offer verification.
+
 ## [0.5.0] - 2026-04-27
 
 ### ⚠ Breaking
