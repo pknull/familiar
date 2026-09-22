@@ -23,6 +23,16 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: familiar
+
+      - name: Reject tracked private workspace files
+        shell: bash
+        run: |
+          tracked_private=$(git ls-files -- Memory/ knowledge/ Work/)
+          if [ -n "$tracked_private" ]; then
+            printf '%s\n' 'Private workspace files must not be tracked:' "$tracked_private"
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
         with:
           repository: pknull/thallus-core

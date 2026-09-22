@@ -7,6 +7,13 @@ Personal companion for the Thallus decentralized AI infrastructure.
 Familiar is the mind of Thallus — an always-on conversational companion that translates
 natural language into egregore network actions. It publishes through the local egregore node.
 
+### Retrieval/Effect Boundary
+
+Familiar owns reasoning and planning; every Effect is Servitor work requested
+through the feed. Familiar may invoke operator-enumerated read-only local
+retrieval only in authenticated local interactions. Network-originated turns
+receive no tools.
+
 ## Module Map
 
 | Module | Location | Purpose |
