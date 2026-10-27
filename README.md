@@ -38,6 +38,15 @@ cargo build --release
 
 Familiar depends on `thallus-core` (shared identity, MCP, and LLM provider abstractions) via path dependency. Build from the Thallus workspace root, or ensure the sibling `thallus-core/` directory is present.
 
+### System packages
+
+Building needs a C toolchain and Perl: SQLCipher and OpenSSL compile from
+source (`bundled-sqlcipher-vendored-openssl`). On Debian or Ubuntu:
+
+```bash
+sudo apt-get install build-essential perl
+```
+
 ## Commands
 
 | Command | Purpose |

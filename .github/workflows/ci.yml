@@ -61,6 +61,11 @@ jobs:
           repository: pknull/thallus-core
           path: thallus-core
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential perl
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -85,6 +90,11 @@ jobs:
           repository: pknull/thallus-core
           path: thallus-core
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential perl
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -106,6 +116,11 @@ jobs:
           repository: pknull/thallus-core
           path: thallus-core
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential perl
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -126,6 +141,11 @@ jobs:
         with:
           repository: pknull/thallus-core
           path: thallus-core
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
 
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit
