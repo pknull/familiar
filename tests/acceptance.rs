@@ -1978,13 +1978,20 @@ triggers:
                 };
                 let (line, payload) = if is_get {
                     gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let failing = failures
-                        .fetch_update(
-                            std::sync::atomic::Ordering::SeqCst,
-                            std::sync::atomic::Ordering::SeqCst,
-                            |n| n.checked_sub(1),
-                        )
-                        .is_ok();
+                    // Take one forced failure if any remain.
+                    let failing = {
+                        use std::sync::atomic::Ordering::SeqCst;
+                        let mut left = failures.load(SeqCst);
+                        loop {
+                            if left == 0 {
+                                break false;
+                            }
+                            match failures.compare_exchange(left, left - 1, SeqCst, SeqCst) {
+                                Ok(_) => break true,
+                                Err(actual) => left = actual,
+                            }
+                        }
+                    };
                     if failing {
                         (
                             "500 Internal Server Error",
