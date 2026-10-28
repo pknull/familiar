@@ -23,7 +23,7 @@ receive no tools.
 | channel | src/channel/ | Transport abstraction, plain REPL, the `tui_channel.rs` TUI bridge, and Discord |
 | cli | src/cli/ | Interactive session driver and `init` implementation |
 | config | src/config/ | TOML types, defaults, loading, and path expansion |
-| daemon | src/daemon.rs | Headless SSE feed watcher, contained query responses, and task-offer assignment flow |
+| daemon | src/daemon.rs | Headless SSE feed watcher, contained query responses, and task-offer assignment flow (publishes `AssignTaskV1` / `assign_task`, tracks `assign_task_result`) |
 | egregore | src/egregore/ | HTTP client for node identity, publish, query, and mesh status |
 | heartbeat | src/heartbeat.rs | Background proactive checks, scheduled triggers, quiet hours, and housekeeping |
 | hooks | src/hooks/ | Pre/post tool-use hook interfaces and currently unwired shell-hook scaffolding |

@@ -1710,6 +1710,18 @@ triggers:
         assert_eq!(request["relates"], hash);
     }
 
+    /// Valid egregore identities (`@<base64>=.ed25519`).
+    const SERVITOR_A: &str = "@jAIbQChO7oD0V6inSad/KLXNXpMV4TQwao1tqZrR0MI=.ed25519";
+    const SERVITOR_B: &str = "@AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=.ed25519";
+    const OPERATOR_ID: &str = "@BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=.ed25519";
+    const FEED_A: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const FEED_B: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    const CONTENT_HASH: &str = "4444444444444444444444444444444444444444444444444444444444444444";
+    const OFFER_2: &str = "5555555555555555555555555555555555555555555555555555555555555555";
+    const OFFER_3: &str = "6666666666666666666666666666666666666666666666666666666666666666";
+    const TASK_HASH: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const OFFER_HASH: &str = "abababababababababababababababababababababababababababababababab";
+
     struct OfferHarness {
         daemon: Daemon,
         request: JoinHandle<serde_json::Value>,
@@ -1742,7 +1754,7 @@ triggers:
             built.conversation,
             EgregoreClient::new(&api_url, Some("test-token".into())),
             api_url,
-            "@test-identity".into(),
+            OPERATOR_ID.into(),
             store_path,
             DaemonConfig::default(),
             AgentConfig {
@@ -1762,7 +1774,7 @@ triggers:
     fn offer_message(author: &str, task_id: &str, claimed_servitor: &str) -> String {
         serde_json::json!({
             "author": author,
-            "hash": "abababababababababababababababababababababababababababababababab",
+            "hash": OFFER_HASH,
             "content": {
                 "type": "task_offer",
                 "task_id": task_id,
@@ -1793,11 +1805,11 @@ triggers:
         reset_home();
         let tmp = TempDir::new().unwrap();
         let (api_url, request) = capture_publish_request().await;
-        let task_id = "task-under-offer";
-        let mut h = build_offer_harness(tmp, api_url, request, task_id, vec!["@servitor-a".into()]);
+        let task_id = TASK_HASH;
+        let mut h = build_offer_harness(tmp, api_url, request, task_id, vec![SERVITOR_A.into()]);
 
         h.daemon
-            .handle_sse_message(&offer_message("@evil-peer", task_id, "@servitor-a"))
+            .handle_sse_message(&offer_message("@evil-peer", task_id, SERVITOR_A))
             .await
             .unwrap();
 
@@ -1812,11 +1824,11 @@ triggers:
         reset_home();
         let tmp = TempDir::new().unwrap();
         let (api_url, request) = capture_publish_request().await;
-        let task_id = "task-under-offer";
+        let task_id = TASK_HASH;
         let mut h = build_offer_harness(tmp, api_url, request, task_id, Vec::new());
 
         h.daemon
-            .handle_sse_message(&offer_message("@servitor-a", task_id, "@servitor-a"))
+            .handle_sse_message(&offer_message(SERVITOR_A, task_id, SERVITOR_A))
             .await
             .unwrap();
 
@@ -1830,22 +1842,1489 @@ triggers:
         reset_home();
         let tmp = TempDir::new().unwrap();
         let (api_url, request) = capture_publish_request().await;
-        let task_id = "task-under-offer";
-        let mut h = build_offer_harness(tmp, api_url, request, task_id, vec!["@servitor-a".into()]);
+        let task_id = TASK_HASH;
+        let mut h = build_offer_harness(tmp, api_url, request, task_id, vec![SERVITOR_A.into()]);
 
         h.daemon
-            .handle_sse_message(&profile_message("@servitor-a"))
+            .handle_sse_message(&profile_message(SERVITOR_A))
             .await
             .unwrap();
         h.daemon
-            .handle_sse_message(&offer_message("@servitor-a", task_id, "@servitor-a"))
+            .handle_sse_message(&offer_message(SERVITOR_A, task_id, SERVITOR_A))
             .await
             .unwrap();
 
         let request = captured_publish(h.request).await;
-        assert_eq!(request["content"]["type"], "task_assign");
-        assert_eq!(request["content"]["task_id"], task_id);
-        assert_eq!(request["content"]["servitor"], "@servitor-a");
+        assert_eq!(request["tags"], serde_json::json!(["assign_task"]));
+        let content = request["content"].as_object().expect("content object");
+
+        // Exactly the assign_task/v1 egregore schema fields (additionalProperties: false).
+        let mut keys: Vec<&str> = content.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "assigner",
+                "attempt_id",
+                "command_id",
+                "executor",
+                "expires_at",
+                "offer_hash",
+                "predecessor",
+                "task_hash",
+                "task_id",
+                "type"
+            ]
+        );
+        assert_eq!(content["type"], "assign_task");
+        assert_eq!(content["task_id"], task_id);
+        assert_eq!(content["task_hash"], task_id);
+        assert_eq!(content["offer_hash"], OFFER_HASH);
+        assert_eq!(content["predecessor"], OFFER_HASH);
+        assert_eq!(content["executor"], SERVITOR_A);
+        assert_eq!(content["assigner"], OPERATOR_ID);
+        assert!(!content["command_id"].as_str().unwrap().is_empty());
+        assert!(!content["attempt_id"].as_str().unwrap().is_empty());
+        assert_ne!(content["command_id"], content["attempt_id"]);
+        let expires = chrono::DateTime::parse_from_rfc3339(content["expires_at"].as_str().unwrap())
+            .expect("expires_at is RFC 3339");
+        assert!(
+            expires > chrono::Utc::now(),
+            "command must not be born expired"
+        );
+    }
+
+    /// Multi-request publish capture. `statuses[i]` is the HTTP status for the
+    /// i-th request (200 once exhausted). Bodies are recorded before replying.
+    struct Capture {
+        url: String,
+        bodies: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        /// Messages served by `GET /v1/feed`.
+        feed: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        /// Remaining `GET /v1/feed/...` requests to fail with a 500.
+        feed_failures: Arc<std::sync::atomic::AtomicUsize>,
+        /// Author-feed GETs received.
+        feed_gets: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Capture {
+        fn fail_next_feed_gets(&self, n: usize) {
+            self.feed_failures
+                .store(n, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn feed_gets(&self) -> usize {
+            self.feed_gets.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn set_feed(&self, messages: Vec<serde_json::Value>) {
+            *self.feed.lock().unwrap() = messages;
+        }
+        fn count(&self) -> usize {
+            self.bodies.lock().unwrap().len()
+        }
+        fn content(&self, i: usize) -> serde_json::Value {
+            self.bodies.lock().unwrap()[i]["content"].clone()
+        }
+    }
+
+    async fn capture_publishes(statuses: Vec<u16>) -> Capture {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let feed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let feed_failures = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let feed_gets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = bodies.clone();
+        let served_feed = feed.clone();
+        let failures = feed_failures.clone();
+        let gets = feed_gets.clone();
+        tokio::spawn(async move {
+            let mut index = 0;
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut bytes = Vec::new();
+                let request = loop {
+                    let mut chunk = [0_u8; 4096];
+                    let read = socket.read(&mut chunk).await.unwrap_or(0);
+                    if read == 0 {
+                        break None;
+                    }
+                    bytes.extend_from_slice(&chunk[..read]);
+                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]).to_string();
+                        let len = headers
+                            .lines()
+                            .find_map(|l| {
+                                let (n, v) = l.split_once(':')?;
+                                n.eq_ignore_ascii_case("content-length")
+                                    .then(|| v.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= end + 4 + len {
+                            let is_get = headers.starts_with("GET ");
+                            let request_line = headers.lines().next().unwrap_or("").to_string();
+                            let body = serde_json::from_slice::<serde_json::Value>(
+                                &bytes[end + 4..end + 4 + len],
+                            )
+                            .ok();
+                            break Some((is_get, request_line, body));
+                        }
+                    }
+                };
+                let Some((is_get, request_line, body)) = request else {
+                    continue;
+                };
+                let (line, payload) = if is_get {
+                    gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let failing = failures
+                        .fetch_update(
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                            |n| n.checked_sub(1),
+                        )
+                        .is_ok();
+                    if failing {
+                        (
+                            "500 Internal Server Error",
+                            r#"{"success":false,"error":{"code":"x","message":"boom"}}"#
+                                .to_string(),
+                        )
+                    } else {
+                        let data = author_feed_page(&served_feed.lock().unwrap(), &request_line);
+                        (
+                            "200 OK",
+                            serde_json::json!({"success": true, "data": data}).to_string(),
+                        )
+                    }
+                } else {
+                    let Some(body) = body else { continue };
+                    recorded.lock().unwrap().push(body);
+                    let status = statuses.get(index).copied().unwrap_or(200);
+                    index += 1;
+                    if status == 200 {
+                        (
+                            "200 OK",
+                            r#"{"success":true,"data":{"hash":"published-hash","sequence":1}}"#
+                                .to_string(),
+                        )
+                    } else {
+                        (
+                            "500 Internal Server Error",
+                            r#"{"success":false,"error":{"code":"x","message":"boom"}}"#
+                                .to_string(),
+                        )
+                    }
+                };
+                let response = format!(
+                    "HTTP/1.1 {line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        Capture {
+            url,
+            bodies,
+            feed,
+            feed_failures,
+            feed_gets,
+        }
+    }
+
+    /// Mimic egregore's `GET /v1/feed/:author`: filter by the path author and
+    /// `content_type`, keep the list order (newest first), and apply
+    /// `offset` and `limit` with the server's 200 cap.
+    fn author_feed_page(feed: &[serde_json::Value], request_line: &str) -> Vec<serde_json::Value> {
+        let target = request_line.split_whitespace().nth(1).unwrap_or("");
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        let decode = |v: &str| {
+            let bytes = v.as_bytes();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'%' && i + 2 < bytes.len() {
+                    if let Ok(b) = u8::from_str_radix(&v[i + 1..i + 3], 16) {
+                        out.push(b);
+                        i += 3;
+                        continue;
+                    }
+                }
+                out.push(bytes[i]);
+                i += 1;
+            }
+            String::from_utf8_lossy(&out).to_string()
+        };
+        let Some(author) = path.strip_prefix("/v1/feed/") else {
+            return Vec::new();
+        };
+        let author = decode(author);
+        let param = |name: &str| {
+            query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix(&format!("{name}=")).map(decode))
+        };
+        let content_type = param("content_type");
+        let offset: usize = param("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let limit: usize = param("limit")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50)
+            .min(200);
+        feed.iter()
+            .filter(|m| m["author"] == author.as_str())
+            .filter(|m| {
+                content_type
+                    .as_deref()
+                    .is_none_or(|ct| m["content"]["type"] == ct)
+            })
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Daemon whose publish log holds the given task envelopes.
+    fn build_assign_daemon(
+        tmp: &TempDir,
+        api_url: String,
+        trusted: &[&str],
+        published: &[(&str, Option<serde_json::Value>)],
+    ) -> Daemon {
+        let built = build_conversation(
+            tmp,
+            "mock",
+            "unused",
+            AgentConfig::default(),
+            ToolTrustConfig::default(),
+            McpPool::new(),
+        );
+        let store_path = built.store_db.to_string_lossy().into_owned();
+        let store = Store::open(std::path::Path::new(&store_path)).unwrap();
+        for (hash, metadata) in published {
+            store
+                .log_published(hash, "task", None, metadata.as_ref())
+                .unwrap();
+        }
+        let workspace = Workspace::new(tmp.path().join("daemon-workspace")).unwrap();
+        Daemon::new(
+            built.conversation,
+            EgregoreClient::new(&api_url, Some("test-token".into())),
+            api_url,
+            OPERATOR_ID.into(),
+            store_path,
+            DaemonConfig::default(),
+            AgentConfig {
+                trusted_servitors: trusted.iter().map(|t| t.to_string()).collect(),
+                ..AgentConfig::default()
+            },
+            workspace,
+            (0, 0),
+        )
+    }
+
+    /// Task metadata as the publish tool logs it: the content carries its own
+    /// `hash`, distinct from the envelope hash.
+    fn task_metadata() -> serde_json::Value {
+        serde_json::json!({"type": "task", "hash": CONTENT_HASH, "request": "deploy"})
+    }
+
+    fn offer_with_hash(author: &str, task_id: &str, offer_hash: &str) -> String {
+        serde_json::json!({
+            "author": author,
+            "hash": offer_hash,
+            "content": {"type": "task_offer", "task_id": task_id, "servitor": author}
+        })
+        .to_string()
+    }
+
+    fn result_message(author: &str, command_id: &str, status: &str) -> String {
+        serde_json::json!({
+            "author": author,
+            "hash": "7777777777777777777777777777777777777777777777777777777777777777",
+            "content": {
+                "type": "assign_task_result",
+                "command_id": command_id,
+                "status": status,
+                "task_id": CONTENT_HASH,
+            }
+        })
+        .to_string()
+    }
+
+    /// Validate against the egregore `assign_task/v1` schema pinned in
+    /// `tests/fixtures/assign_task.v1.json`.
+    fn assert_valid_assign_task(content: &serde_json::Value) {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/assign_task.v1.json")).unwrap();
+        let schema = jsonschema::JSONSchema::compile(&fixture["json_schema"]).unwrap();
+        let outcome = schema.validate(content);
+        if let Err(errors) = outcome {
+            let messages: Vec<String> = errors.map(|e| e.to_string()).collect();
+            panic!("assign_task violates egregore schema: {messages:?}");
+        }
+    }
+
+    /// The pinned schema must equal the one egregore ships, when that
+    /// checkout is present next to this repository.
+    #[test]
+    fn pinned_assign_task_schema_matches_egregore_source() {
+        let source =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../egregore/src/feed/schema.rs");
+        let text = std::fs::read_to_string(&source).unwrap_or_else(|e| {
+            panic!(
+                "egregore checkout required at {} for the schema drift check: {e}",
+                source.display()
+            )
+        });
+        let at = text.find("\"assign_task.v1.json\"").unwrap();
+        let start = text[at..].find("r#\"").unwrap() + at + 3;
+        let end = text[start..].find("\"#").unwrap() + start;
+        let upstream: serde_json::Value = serde_json::from_str(&text[start..end]).unwrap();
+        let pinned: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/assign_task.v1.json")).unwrap();
+        assert_eq!(
+            pinned, upstream,
+            "refresh tests/fixtures/assign_task.v1.json"
+        );
+    }
+
+    /// The command names the task envelope (not the content hash the offer
+    /// cites) and satisfies the egregore schema with valid identities.
+    #[tokio::test]
+    async fn assign_task_binds_task_envelope_and_satisfies_schema() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+
+        assert_eq!(cap.count(), 1);
+        let content = cap.content(0);
+        assert_valid_assign_task(&content);
+        assert_eq!(content["task_id"], CONTENT_HASH);
+        assert_eq!(content["task_hash"], FEED_A);
+        assert_ne!(content["task_hash"], content["task_id"]);
+        assert_eq!(content["executor"], SERVITOR_A);
+        assert_eq!(content["assigner"], OPERATOR_ID);
+        assert_eq!(content["offer_hash"], OFFER_HASH);
+        assert_eq!(content["predecessor"], OFFER_HASH);
+    }
+
+    /// Identical content published twice makes a content-hash offer ambiguous:
+    /// fail closed. An offer that names an envelope exactly still resolves.
+    #[tokio::test]
+    async fn repeated_publication_with_delayed_offer_fails_closed() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+                (FEED_B, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        assert_eq!(
+            cap.count(),
+            0,
+            "ambiguous content hash must not be assigned"
+        );
+
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, FEED_A, OFFER_2))
+            .await
+            .unwrap();
+        assert_eq!(cap.count(), 1);
+        assert_eq!(cap.content(0)["task_hash"], FEED_A);
+    }
+
+    /// A failed publish is retried on a redelivered offer with the same
+    /// command_id and a fresh attempt_id.
+    #[tokio::test]
+    async fn failed_publish_retry_reuses_command_id_with_new_attempt() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![500]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        let offer = offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH);
+        d.handle_sse_message(&offer).await.unwrap();
+        d.handle_sse_message(&offer).await.unwrap();
+
+        assert_eq!(cap.count(), 2);
+        let (first, second) = (cap.content(0), cap.content(1));
+        assert_eq!(first["command_id"], second["command_id"]);
+        assert_ne!(first["attempt_id"], second["attempt_id"]);
+    }
+
+    /// A is rejected, B (another executor) is assigned, then A's rejection is
+    /// replayed: B stays current, so a third offer is not assigned.
+    #[tokio::test]
+    async fn replayed_rejection_cannot_reopen_newer_assignment() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A, SERVITOR_B],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&profile_message(SERVITOR_B))
+            .await
+            .unwrap();
+
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let cmd_a = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        d.handle_sse_message(&result_message(SERVITOR_A, &cmd_a, "rejected"))
+            .await
+            .unwrap();
+
+        d.handle_sse_message(&offer_with_hash(SERVITOR_B, CONTENT_HASH, OFFER_2))
+            .await
+            .unwrap();
+        assert_eq!(cap.count(), 2, "reopened task accepts the next offer");
+        let cmd_b = cap.content(1)["command_id"].as_str().unwrap().to_string();
+        assert_ne!(cmd_a, cmd_b);
+
+        // Replay of A's rejection; then another offer must not be assigned.
+        d.handle_sse_message(&result_message(SERVITOR_A, &cmd_a, "rejected"))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_3))
+            .await
+            .unwrap();
+        assert_eq!(cap.count(), 2, "B is still the current assignment");
+
+        // B's own rejection does reopen the task.
+        d.handle_sse_message(&result_message(SERVITOR_B, &cmd_b, "rejected"))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_3))
+            .await
+            .unwrap();
+        assert_eq!(cap.count(), 3);
+    }
+
+    fn result_with_reason(author: &str, command_id: &str, status: &str, reason: &str) -> String {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&result_message(author, command_id, status)).unwrap();
+        v["content"]["reason"] = serde_json::json!(reason);
+        v.to_string()
+    }
+
+    /// An `expired` rejection leaves the offer valid: Familiar issues a fresh
+    /// command for the same selection, which the owner then accepts. The
+    /// expired command's replay changes nothing.
+    #[tokio::test]
+    async fn expired_rejection_is_renewed_with_new_command_and_accepted() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A, SERVITOR_B],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&profile_message(SERVITOR_B))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let first = cap.content(0);
+        let cmd1 = first["command_id"].as_str().unwrap().to_string();
+
+        d.handle_sse_message(&result_with_reason(
+            SERVITOR_A, &cmd1, "rejected", "expired",
+        ))
+        .await
+        .unwrap();
+        assert_eq!(cap.count(), 2, "expiry must trigger a renewed command");
+        let second = cap.content(1);
+        let cmd2 = second["command_id"].as_str().unwrap().to_string();
+        assert_ne!(cmd1, cmd2);
+        assert_eq!(second["offer_hash"], first["offer_hash"]);
+        assert_eq!(second["task_hash"], first["task_hash"]);
+        assert_valid_assign_task(&second);
+
+        d.handle_sse_message(&result_message(SERVITOR_A, &cmd2, "accepted"))
+            .await
+            .unwrap();
+        // Replay of the expired rejection and a competing offer change nothing.
+        d.handle_sse_message(&result_with_reason(
+            SERVITOR_A, &cmd1, "rejected", "expired",
+        ))
+        .await
+        .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_B, CONTENT_HASH, OFFER_2))
+            .await
+            .unwrap();
+        assert_eq!(cap.count(), 2);
+    }
+
+    /// Non-retryable reasons stay final even when worded like a retry.
+    #[tokio::test]
+    async fn non_retryable_rejection_is_not_renewed() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        let offer = offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH);
+        d.handle_sse_message(&offer).await.unwrap();
+        let cmd = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        d.handle_sse_message(&result_with_reason(
+            SERVITOR_A,
+            &cmd,
+            "rejected",
+            "offer_unavailable",
+        ))
+        .await
+        .unwrap();
+        d.handle_sse_message(&offer).await.unwrap();
+        assert_eq!(cap.count(), 1);
+    }
+
+    fn profile_with_manifest(servitor: &str, manifest_ref: &str) -> String {
+        serde_json::json!({
+            "author": servitor,
+            "hash": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"[..64].to_string(),
+            "timestamp": "2026-08-14T00:00:00Z",
+            "content": {
+                "type": "servitor_profile",
+                "servitor_id": servitor,
+                "manifest_ref": manifest_ref,
+            }
+        })
+        .to_string()
+    }
+
+    fn after_grace() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now() + chrono::Duration::seconds(3600)
+    }
+
+    /// A accepts before expiry but its result is delayed past the timeout.
+    /// Familiar asks the owner again with the same command_id and a fresh
+    /// attempt_id; it never hands the task to a competing offer meanwhile.
+    #[tokio::test]
+    async fn delayed_acceptance_across_timeout_blocks_competing_offer() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A, SERVITOR_B],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&profile_message(SERVITOR_B))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let first = cap.content(0);
+
+        d.reconcile_commands(after_grace()).await;
+        assert_eq!(cap.count(), 2, "unanswered command is replayed");
+        let replay = cap.content(1);
+        assert_eq!(replay["command_id"], first["command_id"]);
+        assert_ne!(replay["attempt_id"], first["attempt_id"]);
+        assert_valid_assign_task(&replay);
+
+        // The timeout alone must not free the task for a competing executor.
+        d.handle_sse_message(&offer_with_hash(SERVITOR_B, CONTENT_HASH, OFFER_2))
+            .await
+            .unwrap();
+        assert_eq!(cap.count(), 2);
+
+        // Backoff: an immediate second reconcile sends nothing.
+        d.reconcile_commands(after_grace()).await;
+        assert_eq!(cap.count(), 2);
+
+        // The delayed acceptance finally arrives; the task stays assigned.
+        let cmd = first["command_id"].as_str().unwrap();
+        d.handle_sse_message(&result_message(SERVITOR_A, cmd, "accepted"))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_B, CONTENT_HASH, OFFER_3))
+            .await
+            .unwrap();
+        assert_eq!(cap.count(), 2);
+    }
+
+    /// An `expired` rejection that arrives long after the grace period is
+    /// still processed (renewal), and replaying the offer afterwards
+    /// publishes nothing new.
+    #[tokio::test]
+    async fn late_expired_rejection_after_grace_renews_and_offer_replay_is_inert() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        let offer = offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH);
+        d.handle_sse_message(&offer).await.unwrap();
+        let cmd1 = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        d.reconcile_commands(after_grace()).await;
+        assert_eq!(cap.count(), 2);
+
+        d.handle_sse_message(&result_with_reason(
+            SERVITOR_A, &cmd1, "rejected", "expired",
+        ))
+        .await
+        .unwrap();
+        assert_eq!(cap.count(), 3, "late expiry rejection still renews");
+        let cmd2 = cap.content(2)["command_id"].as_str().unwrap().to_string();
+        assert_ne!(cmd1, cmd2);
+
+        d.handle_sse_message(&offer).await.unwrap();
+        assert_eq!(cap.count(), 3, "offer replay must not republish");
+        // The old command's replayed rejection changes nothing.
+        d.handle_sse_message(&result_with_reason(
+            SERVITOR_A, &cmd1, "rejected", "expired",
+        ))
+        .await
+        .unwrap();
+        assert_eq!(cap.count(), 3);
+    }
+
+    /// A late final rejection after the grace period reopens the task, and a
+    /// replay of that rejected selection is not republished.
+    #[tokio::test]
+    async fn late_final_rejection_after_grace_then_offer_replay_publishes_nothing() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        let offer = offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH);
+        d.handle_sse_message(&offer).await.unwrap();
+        let cmd = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        d.reconcile_commands(after_grace()).await;
+        d.handle_sse_message(&result_with_reason(
+            SERVITOR_A,
+            &cmd,
+            "rejected",
+            "offer_unavailable",
+        ))
+        .await
+        .unwrap();
+        let before = cap.count();
+        d.handle_sse_message(&offer).await.unwrap();
+        assert_eq!(cap.count(), before);
+    }
+
+    /// A renewal is a new command identity, so it re-runs the planner-basis
+    /// check against the servitor's current profile.
+    #[tokio::test]
+    async fn renewal_revalidates_planner_basis_after_profile_change() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let basis = serde_json::json!({
+            "type": "task",
+            "hash": CONTENT_HASH,
+            "context": {"planner_basis": {"manifest_ref": "M1"}}
+        });
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[(FEED_A, Some(basis.clone())), (CONTENT_HASH, Some(basis))],
+        );
+        d.handle_sse_message(&profile_with_manifest(SERVITOR_A, "M1"))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        assert_eq!(cap.count(), 1);
+        let cmd = cap.content(0)["command_id"].as_str().unwrap().to_string();
+
+        d.handle_sse_message(&profile_with_manifest(SERVITOR_A, "M2"))
+            .await
+            .unwrap();
+        d.handle_sse_message(&result_with_reason(SERVITOR_A, &cmd, "rejected", "expired"))
+            .await
+            .unwrap();
+        assert_eq!(cap.count(), 1, "mismatched profile must block the renewal");
+    }
+
+    /// Three renewals per selection for the life of the task: replaying the
+    /// offer after exhaustion does not start another cycle.
+    #[tokio::test]
+    async fn offer_replay_after_renewal_exhaustion_publishes_nothing() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        let offer = offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH);
+        d.handle_sse_message(&offer).await.unwrap();
+        for i in 0..4 {
+            let cmd = cap.content(i)["command_id"].as_str().unwrap().to_string();
+            d.handle_sse_message(&result_with_reason(SERVITOR_A, &cmd, "rejected", "expired"))
+                .await
+                .unwrap();
+        }
+        assert_eq!(cap.count(), 4, "initial command plus three renewals");
+        d.handle_sse_message(&offer).await.unwrap();
+        assert_eq!(cap.count(), 4);
+    }
+
+    fn feed_result(
+        author: &str,
+        command_id: &str,
+        status: &str,
+        reason: Option<&str>,
+    ) -> serde_json::Value {
+        let raw = match reason {
+            Some(r) => result_with_reason(author, command_id, status, r),
+            None => result_message(author, command_id, status),
+        };
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    /// An acceptance the SSE stream missed but the feed holds settles the
+    /// command without republishing it.
+    #[tokio::test]
+    async fn feed_held_acceptance_settles_due_command_without_republish() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A, SERVITOR_B],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&profile_message(SERVITOR_B))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let cmd = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        cap.set_feed(vec![feed_result(SERVITOR_A, &cmd, "accepted", None)]);
+
+        d.reconcile_commands(after_grace()).await;
+        assert_eq!(cap.count(), 1, "answered command must not be republished");
+        // Settled: no later replay either, and the task stays taken.
+        d.reconcile_commands(after_grace() + chrono::Duration::days(1))
+            .await;
+        d.handle_sse_message(&offer_with_hash(SERVITOR_B, CONTENT_HASH, OFFER_2))
+            .await
+            .unwrap();
+        assert_eq!(cap.count(), 1);
+    }
+
+    /// An `expired` rejection held by the feed is applied like a live one:
+    /// a renewal with a new command_id, and no replay of the old one.
+    #[tokio::test]
+    async fn feed_held_expired_rejection_renews_without_replaying_old_command() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let cmd1 = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        cap.set_feed(vec![feed_result(
+            SERVITOR_A,
+            &cmd1,
+            "rejected",
+            Some("expired"),
+        )]);
+
+        d.reconcile_commands(after_grace()).await;
+        assert_eq!(cap.count(), 2);
+        assert_ne!(cap.content(1)["command_id"].as_str().unwrap(), cmd1);
+    }
+
+    /// Feed entries for another command, or signed by someone other than the
+    /// targeted executor, settle nothing: the command is republished.
+    #[tokio::test]
+    async fn feed_results_for_other_commands_or_authors_do_not_settle() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let cmd = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        cap.set_feed(vec![
+            feed_result(SERVITOR_A, "cmd-other", "accepted", None),
+            feed_result(SERVITOR_B, &cmd, "accepted", None),
+        ]);
+
+        d.reconcile_commands(after_grace()).await;
+        assert_eq!(cap.count(), 2);
+        assert_eq!(cap.content(1)["command_id"].as_str().unwrap(), cmd);
+    }
+
+    /// An idle daemon reconciles on a timer: with no SSE message arriving,
+    /// the tick alone replays a due command.
+    #[tokio::test]
+    async fn periodic_tick_reconciles_without_sse_traffic() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        )
+        .with_clock(after_grace);
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        assert!(cap.count() >= 1);
+        let before = cap.count();
+
+        let idle = futures::stream::pending::<
+            Result<reqwest_eventsource::Event, reqwest_eventsource::Error>,
+        >();
+        let _ = timeout(
+            Duration::from_millis(600),
+            d.drive_events(idle, Duration::from_millis(25)),
+        )
+        .await;
+        assert!(cap.count() > before, "tick must replay the due command");
+    }
+
+    /// Another command's results, newest first, used to bury the target.
+    fn noise(author: &str, n: usize) -> Vec<serde_json::Value> {
+        (0..n)
+            .map(|i| feed_result(author, &format!("cmd-noise-{i}"), "accepted", None))
+            .collect()
+    }
+
+    /// The owner's rejection sits behind more than 200 newer results from the
+    /// same executor: pagination finds it.
+    #[tokio::test]
+    async fn missed_rejection_behind_more_than_200_newer_results_is_found() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let cmd = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        let mut feed = noise(SERVITOR_A, 450);
+        feed.push(feed_result(SERVITOR_A, &cmd, "rejected", Some("expired")));
+        cap.set_feed(feed);
+
+        d.reconcile_commands(after_grace()).await;
+        assert_eq!(
+            cap.count(),
+            2,
+            "renewal published, old command not replayed"
+        );
+        assert_ne!(cap.content(1)["command_id"].as_str().unwrap(), cmd);
+    }
+
+    fn stamped(
+        mut message: serde_json::Value,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> serde_json::Value {
+        message["timestamp"] =
+            serde_json::json!(at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        message
+    }
+
+    /// Results from before the command existed, newest first.
+    fn old_noise(author: &str, n: usize) -> Vec<serde_json::Value> {
+        let base = chrono::Utc::now() - chrono::Duration::days(30);
+        (0..n)
+            .map(|i| {
+                stamped(
+                    feed_result(author, &format!("cmd-old-{i}"), "accepted", None),
+                    base - chrono::Duration::seconds(i as i64),
+                )
+            })
+            .collect()
+    }
+
+    /// A command behind 2,000+ unrelated results is not stuck: the scan
+    /// resumes across rounds, reaches the end of the executor's
+    /// `assign_task_result` feed without a match, and only then republishes.
+    #[tokio::test]
+    async fn command_behind_thousands_of_older_results_is_republished() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        cap.set_feed(old_noise(SERVITOR_A, 2500));
+        d.reconcile_commands(after_grace() + chrono::Duration::days(1))
+            .await;
+        assert_eq!(cap.count(), 1, "cap reached: absence not established");
+        d.reconcile_commands(after_grace() + chrono::Duration::days(2))
+            .await;
+        assert_eq!(cap.count(), 2, "feed read to exhaustion, then republish");
+    }
+
+    /// A capped scan is progress, not failure: a command behind 5,000
+    /// results reaches the end of the feed and republishes within three
+    /// consecutive 30 s ticks, with no backoff wait between them.
+    #[tokio::test]
+    async fn capped_scan_resumes_on_the_next_tick_without_backoff() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        cap.set_feed(old_noise(SERVITOR_A, 5000));
+
+        let t0 = after_grace();
+        d.reconcile_commands(t0).await;
+        d.reconcile_commands(t0 + chrono::Duration::seconds(30))
+            .await;
+        assert_eq!(cap.count(), 1, "still scanning after two ticks");
+        d.reconcile_commands(t0 + chrono::Duration::seconds(60))
+            .await;
+        assert_eq!(cap.count(), 2, "third tick reaches the end and republishes");
+    }
+
+    /// The executor's clock is far behind ours. Its rejection, buried under
+    /// 100 newer results, is still found: no timestamp comparison between
+    /// the two clocks decides absence.
+    #[tokio::test]
+    async fn rejection_from_a_slow_executor_clock_is_found() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let cmd = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        let slow = chrono::Utc::now() - chrono::Duration::minutes(10);
+        let mut feed: Vec<serde_json::Value> = (0..100)
+            .map(|i| {
+                stamped(
+                    feed_result(SERVITOR_A, &format!("cmd-other-{i}"), "accepted", None),
+                    slow - chrono::Duration::seconds(i as i64),
+                )
+            })
+            .collect();
+        feed.push(stamped(
+            feed_result(SERVITOR_A, &cmd, "rejected", Some("expired")),
+            slow - chrono::Duration::seconds(200),
+        ));
+        cap.set_feed(feed);
+
+        d.reconcile_commands(after_grace()).await;
+        assert_eq!(
+            cap.count(),
+            2,
+            "renewal, not a republish of the old command"
+        );
+        assert_ne!(cap.content(1)["command_id"].as_str().unwrap(), cmd);
+    }
+
+    /// A matching result deeper than one round's page budget is found over
+    /// successive rounds, each resuming where the last stopped.
+    #[tokio::test]
+    async fn result_past_the_page_cap_is_found_over_successive_rounds() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let cmd = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        let top = chrono::Utc::now() + chrono::Duration::hours(1);
+        let mut feed: Vec<serde_json::Value> = (0..2300)
+            .map(|i| {
+                stamped(
+                    feed_result(SERVITOR_A, &format!("cmd-new-{i}"), "accepted", None),
+                    top - chrono::Duration::seconds(i as i64),
+                )
+            })
+            .collect();
+        feed.push(stamped(
+            feed_result(SERVITOR_A, &cmd, "rejected", Some("expired")),
+            top - chrono::Duration::seconds(2300),
+        ));
+        cap.set_feed(feed);
+
+        d.reconcile_commands(after_grace() + chrono::Duration::days(1))
+            .await;
+        assert_eq!(cap.count(), 1, "round one hits the cap: no republish");
+        let after_first = cap.feed_gets();
+        d.reconcile_commands(after_grace() + chrono::Duration::days(2))
+            .await;
+        assert_eq!(cap.count(), 2, "round two resumes and finds the rejection");
+        assert_ne!(cap.content(1)["command_id"].as_str().unwrap(), cmd);
+        assert!(
+            cap.feed_gets() - after_first < 20,
+            "round two resumes instead of rescanning from the head"
+        );
+    }
+
+    /// A scan that hits the page cap without reaching the end of the feed is
+    /// not evidence of absence: nothing is republished.
+    #[tokio::test]
+    async fn incomplete_feed_scan_does_not_republish() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        cap.set_feed(noise(SERVITOR_A, 5000));
+        d.reconcile_commands(after_grace()).await;
+        assert_eq!(cap.count(), 1);
+        assert!(cap.feed_gets() > 1, "scan must paginate");
+    }
+
+    /// Failed lookups do not use up the publication budget: after five
+    /// failures a successful lookup still settles the command.
+    #[tokio::test]
+    async fn failed_lookups_do_not_exhaust_replay_budget() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let cmd = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        cap.fail_next_feed_gets(5);
+        for day in 1..=5 {
+            d.reconcile_commands(after_grace() + chrono::Duration::days(day))
+                .await;
+        }
+        assert_eq!(cap.count(), 1, "a failed lookup is not absence");
+        assert_eq!(cap.feed_gets(), 5);
+
+        cap.set_feed(vec![feed_result(
+            SERVITOR_A,
+            &cmd,
+            "rejected",
+            Some("expired"),
+        )]);
+        d.reconcile_commands(after_grace() + chrono::Duration::days(6))
+            .await;
+        assert_eq!(cap.count(), 2, "sixth lookup still runs and settles");
+        assert_ne!(cap.content(1)["command_id"].as_str().unwrap(), cmd);
+    }
+
+    /// Once the publication budget is spent, lookups continue periodically.
+    #[tokio::test]
+    async fn lookups_continue_after_publication_budget_is_spent() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let cmd = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        for day in 1..=8 {
+            d.reconcile_commands(after_grace() + chrono::Duration::days(day))
+                .await;
+        }
+        let published = cap.count();
+        assert_eq!(published, 6, "initial plus five replays");
+        cap.set_feed(vec![feed_result(
+            SERVITOR_A,
+            &cmd,
+            "rejected",
+            Some("expired"),
+        )]);
+        d.reconcile_commands(after_grace() + chrono::Duration::days(9))
+            .await;
+        assert_eq!(
+            cap.count(),
+            published + 1,
+            "late lookup finds the rejection and renews"
+        );
+    }
+
+    /// A completed task is never put back to Assigned by reconciliation, and
+    /// its command is no longer replayed.
+    #[tokio::test]
+    async fn completed_task_is_not_reassigned_by_reconciliation() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A, SERVITOR_B],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&profile_message(SERVITOR_B))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let done = serde_json::json!({
+            "author": SERVITOR_A,
+            "hash": "8888888888888888888888888888888888888888888888888888888888888888",
+            "relates": CONTENT_HASH,
+            "content": {"type": "task_result", "task_id": CONTENT_HASH, "summary": "done"}
+        })
+        .to_string();
+        d.handle_sse_message(&done).await.unwrap();
+
+        // No assignment result is visible anywhere; reconciliation must not
+        // replay the command nor flip the completed task back to Assigned.
+        d.reconcile_commands(after_grace()).await;
+        assert_eq!(cap.count(), 1);
+        // A new offer for the completed task is still not assigned.
+        d.handle_sse_message(&offer_with_hash(SERVITOR_B, CONTENT_HASH, OFFER_2))
+            .await
+            .unwrap();
+        assert_eq!(cap.count(), 1);
+    }
+
+    /// A rejected selection is terminal: redelivering the same offer must not
+    /// republish the rejected command_id.
+    #[tokio::test]
+    async fn rejected_selection_is_not_republished() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        let offer = offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH);
+        d.handle_sse_message(&offer).await.unwrap();
+        let cmd = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        d.handle_sse_message(&result_message(SERVITOR_A, &cmd, "rejected"))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer).await.unwrap();
+        assert_eq!(cap.count(), 1);
+    }
+
+    /// An accepted result for a command whose publish reply was lost (publish
+    /// returned an error) still marks the task assigned.
+    #[tokio::test]
+    async fn accepted_result_after_failed_publish_assigns_task() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let cap = capture_publishes(vec![500]).await;
+        let mut d = build_assign_daemon(
+            &tmp,
+            cap.url.clone(),
+            &[SERVITOR_A, SERVITOR_B],
+            &[
+                (FEED_A, Some(task_metadata())),
+                (CONTENT_HASH, Some(task_metadata())),
+            ],
+        );
+        d.handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        d.handle_sse_message(&profile_message(SERVITOR_B))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_A, CONTENT_HASH, OFFER_HASH))
+            .await
+            .unwrap();
+        let cmd = cap.content(0)["command_id"].as_str().unwrap().to_string();
+        d.handle_sse_message(&result_message(SERVITOR_A, &cmd, "accepted"))
+            .await
+            .unwrap();
+        d.handle_sse_message(&offer_with_hash(SERVITOR_B, CONTENT_HASH, OFFER_2))
+            .await
+            .unwrap();
+        assert_eq!(cap.count(), 1, "task was accepted; no further assignment");
+    }
+
+    /// An offer without a 64-hex feed hash cannot be bound by the command, so
+    /// nothing is published.
+    #[tokio::test]
+    async fn daemon_skips_assignment_when_offer_hash_is_not_a_feed_hash() {
+        let _g = lock_harness();
+        reset_home();
+        let tmp = TempDir::new().unwrap();
+        let (api_url, request) = capture_publish_request().await;
+        let mut h = build_offer_harness(tmp, api_url, request, TASK_HASH, vec![SERVITOR_A.into()]);
+
+        h.daemon
+            .handle_sse_message(&profile_message(SERVITOR_A))
+            .await
+            .unwrap();
+        let offer =
+            offer_message(SERVITOR_A, TASK_HASH, SERVITOR_A).replace(OFFER_HASH, "not-a-hash");
+        h.daemon.handle_sse_message(&offer).await.unwrap();
+
+        assert_no_publish(h.request).await;
     }
 
     /// A trusted offer whose cached profile does not match the task's planner
@@ -1856,7 +3335,7 @@ triggers:
         reset_home();
         let tmp = TempDir::new().unwrap();
         let (api_url, request) = capture_publish_request().await;
-        let task_id = "task-under-offer";
+        let task_id = TASK_HASH;
         let built = build_conversation(
             &tmp,
             "mock",
@@ -1882,11 +3361,11 @@ triggers:
             built.conversation,
             EgregoreClient::new(&api_url, Some("test-token".into())),
             api_url,
-            "@test-identity".into(),
+            OPERATOR_ID.into(),
             store_path,
             DaemonConfig::default(),
             AgentConfig {
-                trusted_servitors: vec!["@servitor-a".into()],
+                trusted_servitors: vec![SERVITOR_A.into()],
                 ..AgentConfig::default()
             },
             workspace,
@@ -1895,11 +3374,11 @@ triggers:
 
         // Cached profile carries no manifest_ref, so it cannot match.
         daemon
-            .handle_sse_message(&profile_message("@servitor-a"))
+            .handle_sse_message(&profile_message(SERVITOR_A))
             .await
             .unwrap();
         daemon
-            .handle_sse_message(&offer_message("@servitor-a", task_id, "@servitor-a"))
+            .handle_sse_message(&offer_message(SERVITOR_A, task_id, SERVITOR_A))
             .await
             .unwrap();
 

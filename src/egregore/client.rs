@@ -174,6 +174,45 @@ impl EgregoreClient {
         Ok(envelope.data.unwrap_or_default())
     }
 
+    /// One page of an author's own feed (`GET /v1/feed/:author`), newest
+    /// first, filtered to a content type. Unlike `/v1/feed` this route honours
+    /// the author.
+    pub async fn query_author_feed(
+        &self,
+        author: &str,
+        content_type: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let url = format!(
+            "{}/v1/feed/{}?content_type={}&limit={}&offset={}",
+            self.api_url,
+            urlencoding::encode(author),
+            urlencoding::encode(content_type),
+            limit,
+            offset
+        );
+        let response =
+            self.auth(self.http.get(&url))
+                .send()
+                .await
+                .map_err(|e| FamiliarError::Egregore {
+                    reason: format!("author feed request failed: {}", e),
+                })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(FamiliarError::Egregore {
+                reason: format!("author feed query failed with {}: {}", status, body),
+            });
+        }
+        let envelope: ApiResponse<Vec<serde_json::Value>> =
+            response.json().await.map_err(|e| FamiliarError::Egregore {
+                reason: format!("failed to parse author feed response: {}", e),
+            })?;
+        Ok(envelope.data.unwrap_or_default())
+    }
+
     /// Query mesh peer health status.
     pub async fn get_mesh(&self) -> Result<Vec<serde_json::Value>> {
         let url = format!("{}/v1/mesh", self.api_url);

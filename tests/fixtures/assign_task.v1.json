@@ -1,0 +1,25 @@
+{
+  "content_type": "assign_task",
+  "version": 1,
+  "description": "Typed operator command assigning one task offer to an executor",
+  "codec": "json",
+  "compatibility": "backward",
+  "json_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["type", "task_id", "task_hash", "offer_hash", "executor", "assigner", "command_id", "attempt_id", "expires_at"],
+    "properties": {
+      "type": { "const": "assign_task" },
+      "task_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "task_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+      "offer_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+      "executor": { "type": "string", "minLength": 12, "maxLength": 128, "pattern": "^@.+\\.ed25519$" },
+      "assigner": { "type": "string", "minLength": 12, "maxLength": 128, "pattern": "^@.+\\.ed25519$" },
+      "predecessor": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+      "command_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "attempt_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "expires_at": { "type": "string", "format": "date-time" }
+    },
+    "additionalProperties": false
+  }
+}

@@ -133,7 +133,7 @@ timeout_secs = 300
 trusted_servitors = ["@servitor-a"]
 ```
 
-Listing an ID is necessary but not sufficient. Before publishing `task_assign`, Familiar also
+Listing an ID is necessary but not sufficient. Before publishing an `AssignTaskV1` command (feed content type `assign_task`), Familiar also
 requires the offer's claimed `servitor` to equal the signing feed author and requires that
 servitor's published profile to match the task's recorded planner basis (including referenced
 manifest, deployment target, or environment snapshot constraints when present). The old
@@ -262,8 +262,18 @@ tasks Familiar published. Broadcast queries without an explicit recipient or ide
 are ignored. Valid task offers are correlated with the local publish log, identity-bound, and
 recorded. Automatic assignment of the first eligible offer occurs only after the
 [`trusted_servitors` trust gate](#auto-assignment-trust-trusted_servitors) passes, including the
-mandatory published-profile and planner-basis checks; task results and failures then close the
-tracked lifecycle.
+mandatory published-profile and planner-basis checks. The command binds the task's feed hash and
+the offer's feed hash, names the offer author as `executor` and the local node as `assigner`, uses
+the offer hash as `predecessor`, and carries a `command_id` (reused when the same selection is
+retried), a fresh `attempt_id`, and a 10-minute `expires_at` (RFC 0003 §7). The executor's
+`assign_task_result` is tracked by `command_id`: `accepted` keeps the task assigned, while
+`rejected` or `superseded` reopens it for another offer. A command with no result by `expires_at` plus a grace period is reconciled
+(on every SSE message and every 30 s): Familiar first looks for the executor's recorded
+`assign_task_result` on the local feed and applies it, and only if none exists republishes the
+same `command_id` with a fresh `attempt_id` (at most five times). The lookup pages through the executor's own feed (`/v1/feed/:author`, up to 20 pages of 100 per round, newest first, resuming from the offset reached on the next round; absence means the feed was read to its end, never a timestamp comparison); a failed or capped scan is retried later and never treated as absence, and lookups continue, with capped backoff, after the republication budget is spent. Familiar never
+reassigns a task on its own clock; an `expired` rejection yields at most three renewals per
+selection, each re-running the trust and planner-basis checks. Task results and failures then
+close the tracked lifecycle.
 
 **Network input containment.** Feed-originated queries are answered through an untooled model
 turn: no MCP, retrieval, workspace, or publish tools are advertised or executed, and the prompt
@@ -319,7 +329,7 @@ Default mode runs a `ratatui` operator console with configurable sidebar panes:
 | Pane Source | Shows |
 |-------------|-------|
 | `egregore_feed` | Recent messages from the feed, optionally filtered by content type |
-| `tasks` | Task lifecycle messages (`task`, `task_offer`, `task_assign`, `task_result`) |
+| `tasks` | Task lifecycle messages (`task`, `task_offer`, `assign_task`, `assign_task_result`, `task_result`) |
 | `peers` | Mesh peer health |
 | `script` | Output of any shell command, polled on an interval |
 

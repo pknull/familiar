@@ -11,6 +11,10 @@ All notable changes to familiar are documented here. The format follows [Keep a 
 - Automatic task assignment now fails closed unless `[agent].trusted_servitors` is non-empty and contains the offering servitor. Published-profile and planner-basis verification is mandatory, and the `verify_servitor_profile` opt-out has been removed.
 - Discord guild admission now fails closed: an empty `guild_allowlist` admits no guilds and produces a startup warning.
 
+### Changed
+
+- Automatic assignment publishes the RFC 0003 `AssignTaskV1` command (content type `assign_task`) in place of `task_assign`, binding task hash, offer hash, executor, assigner, predecessor, `command_id`, `attempt_id`, and `expires_at`. The daemon tracks the executor's `assign_task_result` and reopens the task when the command is rejected or superseded.
+
 ### Fixed
 
 - `published_metadata` now handles SQL `NULL` metadata rows instead of failing during mandatory task-offer verification.

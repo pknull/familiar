@@ -412,7 +412,18 @@ async fn run(cli: Cli) -> Result<()> {
                                                     let status = match content_type {
                                                         "task" => "pending",
                                                         "task_offer" => "offered",
-                                                        "task_assign" => "active",
+                                                        "assign_task" => "active",
+                                                        "assign_task_result" => m
+                                                            .get("content")
+                                                            .and_then(|c| c.get("status"))
+                                                            .and_then(|s| s.as_str())
+                                                            .map_or("unknown", |st| {
+                                                                if st == "accepted" {
+                                                                    "active"
+                                                                } else {
+                                                                    st
+                                                                }
+                                                            }),
                                                         "task_result" => m
                                                             .get("content")
                                                             .and_then(|c| c.get("status"))

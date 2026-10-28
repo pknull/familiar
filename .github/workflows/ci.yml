@@ -89,6 +89,12 @@ jobs:
         with:
           repository: pknull/thallus-core
           path: thallus-core
+      # Source of the assign_task schema pinned in tests/fixtures; the drift
+      # test fails when this checkout is missing.
+      - uses: actions/checkout@v7
+        with:
+          repository: pknull/egregore
+          path: egregore
 
       - name: Install system dependencies
         run: |

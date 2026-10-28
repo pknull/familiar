@@ -39,6 +39,8 @@ crossterm = { version = "0.29.0", features = ["event-stream"] }
 ratatui-textarea = "0.8.0"
 
 [dev-dependencies]
+# Validates published commands against the pinned egregore assign_task/v1 schema.
+jsonschema = "0.18"
 tempfile = "3"
 tokio-test = "0.4"
 # Raw keyed access in tests to corrupt the store and force bind failures.

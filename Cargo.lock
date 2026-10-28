@@ -770,6 +770,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "hex",
+ "jsonschema",
  "rand 0.8.7",
  "ratatui",
  "ratatui-textarea",
