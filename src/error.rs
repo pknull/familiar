@@ -1,5 +1,6 @@
 //! Error types for Familiar.
 
+use thallus_core::error::{HttpError, JsonError};
 use thallus_core::CoreError;
 use thiserror::Error;
 
@@ -41,11 +42,25 @@ pub enum FamiliarError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Bounded: category and position only, never the input.
     #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(JsonError),
 
+    /// Bounded: kind and status only, never the URL or a response body.
     #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(HttpError),
+}
+
+impl From<serde_json::Error> for FamiliarError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Json(err.into())
+    }
+}
+
+impl From<reqwest::Error> for FamiliarError {
+    fn from(err: reqwest::Error) -> Self {
+        Self::Http(err.into())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, FamiliarError>;
